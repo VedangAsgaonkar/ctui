@@ -676,3 +676,102 @@ def test_access_log_is_committed(config, project, fake_claude, monkeypatch):
     assert not G.is_dirty(config.tasks_repo)
     tracked = G.run(config.tasks_repo, "ls-files").out
     assert "recent.json" in tracked
+
+
+# ---- setup offers the dream job ------------------------------------
+
+def test_setup_installs_the_dream_job(tmp_path, answers, fake_cron):
+    from ctui import cron
+    answers["text"] = ["", "", "03:15"]        # no remotes, then the time
+    answers["path"] = [str(tmp_path / "c")]
+    answers["confirm"] = [True]                # yes, install it
+
+    assert C.cmd_setup() == 0
+    assert cron.installed()
+    assert "15 3 * * *" in fake_cron.read_text()
+    assert "--dream" in fake_cron.read_text()
+
+
+def test_setup_can_decline_the_dream_job(tmp_path, answers, fake_cron, capsys):
+    from ctui import cron
+    answers["text"] = ["", ""]
+    answers["path"] = [str(tmp_path / "c")]
+    answers["confirm"] = [False]
+
+    assert C.cmd_setup() == 0
+    assert not cron.installed()
+    assert "ctui --install-dream" in capsys.readouterr().out
+
+
+def test_setup_reprompts_on_a_bad_time(tmp_path, answers, fake_cron, capsys):
+    from ctui import cron
+    answers["text"] = ["", "", "25:00", "04:00"]
+    answers["path"] = [str(tmp_path / "c")]
+    answers["confirm"] = [True]
+
+    assert C.cmd_setup() == 0
+    assert "0 4 * * *" in fake_cron.read_text()
+    assert "not a valid time" in capsys.readouterr().err
+
+
+def test_setup_survives_an_unusable_crontab(tmp_path, answers, capsys):
+    """The default fixture points CTUI_CRONTAB_BIN at a failing stub."""
+    answers["text"] = ["", ""]
+    answers["path"] = [str(tmp_path / "c")]
+
+    assert C.cmd_setup() == 0                  # setup still succeeds
+    assert CFG.load().tasks_repo.is_dir()
+    assert "could not install the dream job" in capsys.readouterr().err
+
+
+def test_setup_offers_to_reinstall_an_existing_job(tmp_path, answers, fake_cron):
+    from ctui import cron
+    cron.install("/old/ctui", None, 1, 0)
+
+    answers["text"] = ["", ""]
+    answers["path"] = [str(tmp_path / "c")]
+    answers["confirm"] = [False]               # keep the existing schedule
+
+    assert C.cmd_setup() == 0
+    assert "0 1 * * *" in fake_cron.read_text()
+    assert "/old/ctui" in fake_cron.read_text()
+
+
+# ---- install/uninstall commands ------------------------------------
+
+def test_install_dream_command(config, fake_cron, capsys):
+    from ctui import cron
+    assert C.cmd_install_dream(at="02:45") == 0
+    assert "45 2 * * *" in fake_cron.read_text()
+    assert "installed" in capsys.readouterr().out
+    assert cron.installed()
+
+
+def test_install_dream_defaults_to_the_standard_time(config, fake_cron):
+    from ctui import cron
+    C.cmd_install_dream()
+    assert f"{cron.DEFAULT_MINUTE} {cron.DEFAULT_HOUR} * * *" in fake_cron.read_text()
+
+
+def test_install_dream_rejects_a_bad_time(config, fake_cron):
+    with pytest.raises(C.CommandError, match="04:30"):
+        C.cmd_install_dream(at="nope")
+
+
+def test_install_dream_requires_setup(fake_cron, monkeypatch, tmp_path):
+    monkeypatch.setenv("CTUI_RC", str(tmp_path / "absent.json"))
+    with pytest.raises(CFG.ConfigError):
+        C.cmd_install_dream()
+
+
+def test_uninstall_dream_command(config, fake_cron, capsys):
+    from ctui import cron
+    C.cmd_install_dream()
+    assert C.cmd_uninstall_dream() == 0
+    assert not cron.installed()
+    assert "removed" in capsys.readouterr().out
+
+
+def test_uninstall_dream_when_absent(config, fake_cron, capsys):
+    assert C.cmd_uninstall_dream() == 0
+    assert "no dream job" in capsys.readouterr().out

@@ -142,3 +142,58 @@ def test_resume_still_takes_passthrough_args(monkeypatch):
     assert cli.main(["--resume", "--global", "--", "--model", "opus"]) == 0
     assert seen["extra"] == ["--model", "opus"]
     assert seen["scope"] == "global"
+
+
+# ---- dream flags ---------------------------------------------------
+
+def test_dream_dispatches_with_date_and_dry_run(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(C, "cmd_dream", lambda **kw: (seen.update(kw), 0)[1])
+    assert cli.main(["--dream", "--date", "2026-09-01", "--dry-run"]) == 0
+    assert seen["day"] == "2026-09-01"
+    assert seen["dry_run"] is True
+
+
+def test_dream_takes_passthrough_args(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(C, "cmd_dream", lambda **kw: (seen.update(kw), 0)[1])
+    assert cli.main(["--dream", "--", "--model", "opus"]) == 0
+    assert seen["extra"] == ["--model", "opus"]
+
+
+def test_install_dream_dispatches_with_at(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(C, "cmd_install_dream", lambda **kw: (seen.update(kw), 0)[1])
+    assert cli.main(["--install-dream", "--at", "05:00"]) == 0
+    assert seen["at"] == "05:00"
+
+
+def test_uninstall_dream_dispatches(monkeypatch):
+    called = {}
+
+    def _stub(*a, **k):
+        called["hit"] = True
+        return 0
+
+    monkeypatch.setattr(C, "cmd_uninstall_dream", _stub)
+    assert cli.main(["--uninstall-dream"]) == 0
+    assert called["hit"]
+
+
+@pytest.mark.parametrize("argv,message", [
+    (["--date", "2026-09-01"], "--date only applies to --dream"),
+    (["--dry-run"], "--dry-run only applies to --dream"),
+    (["--at", "04:00"], "--at only applies to --install-dream"),
+    (["--sync", "--date", "2026-09-01"], "--date only applies to --dream"),
+    (["--dream", "--at", "04:00"], "--at only applies to --install-dream"),
+])
+def test_dream_flag_validation(argv, message, capsys):
+    with pytest.raises(SystemExit):
+        cli.main(argv)
+    assert message in capsys.readouterr().err
+
+
+def test_dream_modes_are_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--dream", "--install-dream"])
+    assert "not allowed with" in capsys.readouterr().err

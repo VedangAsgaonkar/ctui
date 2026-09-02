@@ -24,7 +24,47 @@ def _isolate(tmp_path, monkeypatch):
     gitconfig.write_text("[init]\n\tdefaultBranch = main\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(gitconfig))
     monkeypatch.setenv("GIT_CONFIG_SYSTEM", str(tmp_path / "gitconfig-system"))
+    monkeypatch.setenv("CTUI_CACHE", str(tmp_path / "cache"))
+    monkeypatch.setenv("CTUI_CLAUDE_PROJECTS", str(tmp_path / "claude-projects"))
+
+    # A fake `crontab` backed by a file, so no test can reach the real one even
+    # by accident. Tests that care install the real-shaped fake via `fake_cron`.
+    forbidden = tmp_path / "no-crontab"
+    forbidden.write_text("#!/bin/sh\necho 'refusing to touch the real crontab' >&2\nexit 1\n")
+    forbidden.chmod(0o755)
+    monkeypatch.setenv("CTUI_CRONTAB_BIN", str(forbidden))
     return home
+
+
+@pytest.fixture
+def fake_cron(tmp_path, monkeypatch):
+    """A working `crontab` stand-in over a plain file.
+
+    Emulates the real thing closely enough to matter: `-l` on an empty crontab
+    exits non-zero with "no crontab for ...", which is the case ctui has to
+    treat as empty rather than as a failure.
+    """
+    store = tmp_path / "crontab.txt"
+    script = tmp_path / "fake-crontab"
+    script.write_text(f"""#!/usr/bin/env python3
+import sys, pathlib
+store = pathlib.Path({str(store)!r})
+if sys.argv[1:] == ["-l"]:
+    if not store.exists():
+        sys.stderr.write("no crontab for tester\\n")
+        sys.exit(1)
+    sys.stdout.write(store.read_text())
+elif sys.argv[1:] == ["-r"]:
+    store.unlink(missing_ok=True)
+elif sys.argv[1:] == ["-"]:
+    store.write_text(sys.stdin.read())
+else:
+    sys.stderr.write(f"unexpected args: {{sys.argv[1:]}}\\n")
+    sys.exit(2)
+""")
+    script.chmod(0o755)
+    monkeypatch.setenv("CTUI_CRONTAB_BIN", str(script))
+    return store
 
 
 @pytest.fixture

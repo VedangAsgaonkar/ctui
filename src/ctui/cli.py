@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import commands, ui
+from . import commands, cron, ui
 from .config import ConfigError
 
 VERSION = "0.1.0"
@@ -22,6 +22,11 @@ examples:
   ctui --resume --global       ... pick from every known task instead
   ctui --resume --recent       ... pick from the 5 most recently opened
   ctui --sync                  pull and push the tasks and wiki repos
+  ctui --dream                 distil yesterday's sessions into the wiki
+  ctui --dream --date 2026-09-01 --dry-run
+                               show what would be distilled, without claude
+  ctui --install-dream --at 03:00
+                               (re)install the nightly cron job
   ctui --list                  print all tasks (non-interactive)
 
 Anything after `--` is passed through to claude, e.g.
@@ -50,6 +55,13 @@ def build_parser() -> argparse.ArgumentParser:
                            "its claude sessions")
     mode.add_argument("--list", action="store_true",
                       help="list every known task")
+    mode.add_argument("--dream", action="store_true",
+                      help="distil a day's claude sessions into the wiki's dated "
+                           "page (run nightly by cron)")
+    mode.add_argument("--install-dream", action="store_true",
+                      help="install or replace the daily dream cron job")
+    mode.add_argument("--uninstall-dream", action="store_true",
+                      help="remove the daily dream cron job")
 
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--global", dest="global_scope", action="store_true",
@@ -60,6 +72,14 @@ def build_parser() -> argparse.ArgumentParser:
                             "recently opened tasks")
 
     parser.add_argument("-n", "--name", help="task name for --init (skips the prompt)")
+    parser.add_argument("--date", metavar="YYYY-MM-DD",
+                        help="with --dream, the day to distil (default: yesterday)")
+    parser.add_argument("--at", metavar="HH:MM",
+                        help=f"with --install-dream, the time to run "
+                             f"(default {cron.DEFAULT_HOUR:02d}:{cron.DEFAULT_MINUTE:02d})")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="with --dream, stage the digests and report without "
+                             "calling claude")
     parser.add_argument("--no-launch", action="store_true",
                         help="with --init, create the task without starting a session")
     parser.add_argument("--version", action="version", version=f"ctui {VERSION}")
@@ -80,8 +100,16 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     extra = _claude_passthrough(args.claude_args)
 
-    if extra and not (args.init or args.launch or args.resume):
-        parser.error("pass-through claude arguments only apply to --init, --launch or --resume")
+    if extra and not (args.init or args.launch or args.resume or args.dream):
+        parser.error("pass-through claude arguments only apply to --init, "
+                     "--launch, --resume or --dream")
+
+    if args.date and not args.dream:
+        parser.error("--date only applies to --dream")
+    if args.dry_run and not args.dream:
+        parser.error("--dry-run only applies to --dream")
+    if args.at and not args.install_dream:
+        parser.error("--at only applies to --install-dream")
 
     if (args.global_scope or args.recent) and not args.resume:
         parser.error("--global and --recent only apply to --resume")
@@ -105,6 +133,13 @@ def main(argv: list[str] | None = None) -> int:
             return commands.cmd_resume(extra=extra, scope=scope)
         if args.list:
             return commands.cmd_list()
+        if args.dream:
+            return commands.cmd_dream(day=args.date, extra=extra,
+                                      dry_run=args.dry_run)
+        if args.install_dream:
+            return commands.cmd_install_dream(at=args.at)
+        if args.uninstall_dream:
+            return commands.cmd_uninstall_dream()
     except ui.Aborted as exc:
         ui.info(f"\n{exc}")
         return 130

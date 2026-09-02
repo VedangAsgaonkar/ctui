@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import sys
+from datetime import date
 from pathlib import Path
 
 from questionary import Choice
 
-from . import gitutil, ui
+from . import cron, dream, gitutil, ui, wiki
 from .config import (
     DEFAULT_TASKS_DIRNAME,
     DEFAULT_WIKI_DIRNAME,
@@ -18,6 +22,7 @@ from .config import (
 )
 from .launcher import (
     LauncherError,
+    claude_bin,
     launch_session,
     open_shell,
     register_session,
@@ -103,6 +108,49 @@ def _prepare_repo(path: Path, remote: str | None, label: str) -> None:
             ui.step("run `ctui --sync` to push it to origin")
 
 
+def _offer_dream_job() -> None:
+    """Offer to install the nightly dream job, on the way out of setup.
+
+    Left until after the config is written so that declining, or a crontab
+    failure, cannot cost the user a working setup.
+    """
+    ui.heading("Nightly dream job")
+    if not cron.available():
+        ui.warn("no `crontab` on PATH — skipping (install it and run "
+                "`ctui --install-dream`)")
+        return
+
+    try:
+        if cron.installed():
+            ui.step(f"already installed: {cron.current_line()}")
+            if not ui.ask_confirm("Reinstall it (to change the time)?", default=False):
+                return
+        else:
+            ui.info("`dream` reads each day's claude sessions and distils the "
+                    "reusable\nlearnings into the wiki's dated pages.")
+            if not ui.ask_confirm("Install the daily dream job?", default=True):
+                ui.step("skipped — run `ctui --install-dream` later to add it")
+                return
+
+        while True:
+            at = ui.ask_text("Time to run it (HH:MM):",
+                             default=f"{cron.DEFAULT_HOUR:02d}:{cron.DEFAULT_MINUTE:02d}")
+            try:
+                hour, minute = cron.parse_time(at)
+                break
+            except cron.CronError as exc:
+                ui.warn(str(exc))
+
+        line = cron.install(_ctui_bin(), _claude_bin_or_none(), hour, minute)
+    except cron.CronError as exc:
+        ui.warn(f"could not install the dream job: {exc}")
+        ui.step("run `ctui --install-dream` once that is sorted")
+        return
+
+    ui.ok("installed")
+    ui.info(f"    {line}")
+
+
 def _ensure_gitignore(repo: Path) -> None:
     """Keep OS/editor noise out of the synced repos."""
     gitignore = repo / ".gitignore"
@@ -167,6 +215,8 @@ def cmd_setup(rc: Path | None = None) -> int:
         wiki_remote=wiki_remote or None,
     )
     written = config.save(target_rc)
+
+    _offer_dream_job()
 
     ui.heading("Done")
     ui.ok(f"tasks repo: {tasks_repo}")
@@ -450,3 +500,132 @@ def cmd_list() -> int:
     if any(t.host != this_host for t in tasks):
         ui.info("\n* = task from another host")
     return 0
+
+
+# =====================================================================
+# dream (the nightly wiki pass)
+# =====================================================================
+
+def _require_wiki(config) -> Path:
+    if not config.wiki_repo:
+        raise CommandError(
+            "No wiki repo is configured. Re-run `ctui --setup` to add one."
+        )
+    if not gitutil.is_repo(config.wiki_repo):
+        raise CommandError(
+            f"{config.wiki_repo} is not a git repo. Re-run `ctui --setup`."
+        )
+    return config.wiki_repo
+
+
+def cmd_dream(day: str | None = None, extra: list[str] | None = None,
+              dry_run: bool = False) -> int:
+    """Distil one day's sessions into the wiki's dated page.
+
+    Runs unattended from cron, so it reports and moves on rather than aborting:
+    one unreadable session must not cost the rest of the day's learnings.
+    """
+    config = load()
+    wiki_repo = _require_wiki(config)
+
+    try:
+        target = date.fromisoformat(day) if day else dream.yesterday()
+    except ValueError:
+        raise CommandError(f"Expected a date like 2026-09-01, got {day!r}.") from None
+
+    ui.heading(f"dream: {target.isoformat()}")
+
+    digests = dream.collect(config.tasks_repo, target)
+    if not digests:
+        ui.step(f"no sessions were active on {target.isoformat()}")
+        return 0
+
+    page = wiki.ensure_page(wiki_repo, target)
+    already = wiki.folded_sessions(page)
+    pending = [d for d in digests if d.session_id not in already]
+
+    ui.step(f"{len(digests)} session(s) active, {len(pending)} not yet distilled")
+    if not pending:
+        return 0
+
+    staged = dream.stage_digests(target, pending)
+
+    if dry_run:
+        for item, path in staged:
+            ui.info(f"    {item.task_id} {item.session_id[:8]}  {path}"
+                    f"  ({len(item.body)} chars)")
+        ui.step(f"would update {page}")
+        return 0
+
+    failures = 0
+    for index, (item, digest_path) in enumerate(staged, start=1):
+        label = f"{item.task_id} {item.session_id[:8]}"
+        prompt = dream.dream_prompt(digest_path, page, item, index, len(staged))
+        try:
+            proc = dream._run_claude(prompt, wiki_repo, digest_path.parent, extra)
+        except LauncherError as exc:
+            raise CommandError(str(exc)) from exc
+        except subprocess.TimeoutExpired:
+            ui.warn(f"{label}: timed out after {dream.SESSION_TIMEOUT}s")
+            failures += 1
+            continue
+
+        if proc.returncode != 0:
+            ui.warn(f"{label}: claude exited {proc.returncode}: "
+                    f"{(proc.stderr or proc.stdout).strip()[:300]}")
+            failures += 1
+            continue
+
+        if dream.NOTHING_MARKER in proc.stdout:
+            ui.step(f"{label}: nothing generalised")
+        else:
+            ui.ok(f"{label}: distilled")
+        # Recorded even when nothing was written, so a re-run does not pay to
+        # re-read a session that had nothing to give.
+        wiki.record_folded(page, item.session_id, item.task_id, item.task_name)
+
+    if gitutil.commit_all(wiki_repo, f"ctui dream: {target.isoformat()}"):
+        ui.ok(f"committed {page.relative_to(wiki_repo)}")
+
+    return 1 if failures else 0
+
+
+def cmd_install_dream(at: str | None = None) -> int:
+    if not cron.available():
+        raise CommandError("No `crontab` on PATH; cannot install the dream job.")
+    load()  # fail early if ctui is not set up
+    try:
+        hour, minute = cron.parse_time(at) if at else (cron.DEFAULT_HOUR,
+                                                       cron.DEFAULT_MINUTE)
+        line = cron.install(_ctui_bin(), _claude_bin_or_none(), hour, minute)
+    except cron.CronError as exc:
+        raise CommandError(str(exc)) from exc
+    ui.ok("installed the daily dream job")
+    ui.info(f"    {line}")
+    return 0
+
+
+def cmd_uninstall_dream() -> int:
+    if not cron.available():
+        raise CommandError("No `crontab` on PATH.")
+    try:
+        removed = cron.uninstall()
+    except cron.CronError as exc:
+        raise CommandError(str(exc)) from exc
+    ui.ok("removed the dream job" if removed else "no dream job was installed")
+    return 0
+
+
+def _ctui_bin() -> str:
+    """Absolute path to this ctui, for the crontab entry."""
+    found = shutil.which("ctui")
+    if found:
+        return str(Path(found).resolve())
+    return f"{Path(sys.executable).resolve()} -m ctui"
+
+
+def _claude_bin_or_none() -> str | None:
+    try:
+        return claude_bin()
+    except LauncherError:
+        return None
