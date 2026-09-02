@@ -1,0 +1,8 @@
+# pixi-managed environments (pixi.lock is committed, .pixi/ is not)
+.pixi/
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/

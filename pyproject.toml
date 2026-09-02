@@ -1,0 +1,16 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ctui"
+version = "0.1.0"
+description = "A task-oriented wrapper around claude-code"
+requires-python = ">=3.11"
+dependencies = ["questionary>=2.0"]
+
+[project.scripts]
+ctui = "ctui.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ctui"]
