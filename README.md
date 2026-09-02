@@ -98,11 +98,13 @@ and the entry uses absolute paths because cron runs with a near-empty environmen
 
 For a given day (default: yesterday) it:
 
-1. Finds every session active that day. No extra bookkeeping is needed — a session's
-   transcript is at `~/.claude/projects/<root with / as ->/<session-id>.jsonl`, which
-   is reconstructible from the task root and the session ids already in `task.json`.
-   Transcript timestamps are UTC, so they are converted to local dates before
-   bucketing, and an mtime check skips files that cannot contain the day.
+1. Finds every session active that day. Candidates come from the [access
+   index](#the-access-index), so the work scales with the sessions opened around that
+   day rather than with every session on the host. A candidate's transcript is at
+   `~/.claude/projects/<root with / as ->/<session-id>.jsonl`, reconstructible from
+   the task root and the session ids in `task.json`. Transcript timestamps are UTC, so
+   they are converted to local dates before bucketing, and an mtime check skips files
+   that cannot contain the day.
 2. Digests each one: user messages verbatim, assistant prose, and the tool *calls*.
    Tool *results* and thinking blocks are dropped, which is most of the volume — a
    53 KB transcript becomes ~5 KB. Digests are staged under `~/.cache/ctui/dream/`.
@@ -148,7 +150,7 @@ level so several machines can share one remote without colliding:
 ctui-tasks/
 └── furiosa.stanford.edu/
     ├── index.json                           # root directory -> task ids (a cache)
-    ├── recent.json                          # this host's access log, newest first
+    ├── access.json                          # what was opened when, newest first
     └── TASK_20260901_234905/
         ├── root -> /abs/path/to/project     # symlink to the task's root directory
         └── task.json
@@ -213,18 +215,51 @@ It is stored per hostname rather than as one shared file: the lookups are host-s
 anyway, and a single global file would be rewritten by every machine and conflict on
 every `ctui --sync`. Each host only ever writes its own.
 
-### The access log
+### The access index
 
-`recent.json` sits beside it and backs `ctui --resume --recent`, recording when each
-task was last opened — an ordering the task directories do not carry, since
-`TASK_<datetime>` is creation time, not last use. `--init`, `--launch` and `--resume`
-all append to it (opening a shell in a task root counts too), most recent first,
-capped at 50 entries, and re-opening a task moves it to the front rather than
-duplicating it. Entries whose task directory has since been deleted are skipped.
+`access.json` sits beside it: one row per `(task, session)` ctui has opened, ordered
+most recently accessed first, with the first and last access times and a count.
 
-Like the index it is written only by the host doing the accessing, so two machines
-cannot conflict on it. Entries name their own host, so a task resumed across hosts via
-`--global` is still recorded and resolved correctly.
+```json
+{
+  "version": 1,
+  "hostname": "furiosa.stanford.edu",
+  "entries": [
+    {"host": "furiosa.stanford.edu", "task_id": "TASK_20260902_004505",
+     "session_id": "95a18469-…", "first_at": "2026-09-02T00:45:05-07:00",
+     "last_at": "2026-09-02T09:12:44-07:00", "count": 3}
+  ]
+}
+```
+
+`--init`, `--launch` and `--resume` all record (opening a shell counts for recency but
+has no `session_id`, since there is no transcript). Re-opening bumps a row in place
+rather than appending, so the file is bounded by session count.
+
+Two callers, one structure:
+
+- **`--resume --recent`** wants tasks by recency — this list, deduped by task. It is
+  an ordering the task directories cannot give: `TASK_<datetime>` is creation time,
+  not last use.
+- **`--dream`** wants the sessions that could have been active on a day. Without this
+  it had to stat and parse *every* transcript on the host, at a cost that grew with
+  total sessions rather than with the day: at 302 sessions, 302 parses / ~830 ms
+  versus 2 parses / ~10 ms.
+
+Day coverage is deliberately generous at the upper end. Only a session's *opening* is
+recorded, never when it stopped, so a row counts for one day past its last access —
+otherwise a session started at 23:50 and worked past midnight would be lost. False
+positives cost one transcript parse; a false negative loses a day's learnings. The
+transcript remains the authority on which records belong to which day; the index only
+decides which transcripts are worth opening.
+
+Sessions the index has never seen — predating it, or arrived by `git pull` — are
+seeded on the next `--dream` from their transcript's own timestamp span, so the
+exhaustive scan is paid once instead of nightly.
+
+Like the root index it is written only by the host doing the accessing, so two
+machines cannot conflict on it, and rows name their own host so a task resumed across
+hosts via `--global` still resolves.
 
 Session IDs are generated by `ctui` and handed to claude via `--session-id`, so a
 session is recorded in `task.json` *before* it starts rather than scraped afterwards.

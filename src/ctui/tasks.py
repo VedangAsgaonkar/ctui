@@ -18,7 +18,8 @@ import platform
 import socket
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import date as Date
+from datetime import datetime, timedelta
 from pathlib import Path
 
 TASK_PREFIX = "TASK_"
@@ -27,9 +28,14 @@ ROOT_LINK = "root"
 TASK_JSON = "task.json"
 INDEX_JSON = "index.json"
 INDEX_VERSION = 1
-RECENT_JSON = "recent.json"
-RECENT_VERSION = 1
-RECENT_CAP = 50
+ACCESS_JSON = "access.json"
+ACCESS_VERSION = 1
+LEGACY_RECENT_JSON = "recent.json"
+
+# A session opened late on one day can still be running after midnight, and
+# only its opening is recorded. Treat an entry as possibly-active for a day
+# after its last access so those spans are not missed.
+ACCESS_SPAN_GRACE = timedelta(days=1)
 
 
 class TaskError(Exception):
@@ -515,79 +521,205 @@ def _same_path(a: Path, b: Path) -> bool:
 
 
 # =====================================================================
-# recently accessed tasks
+# access index
 #
-# `ctui --resume --recent` needs an ordering the task directories do not carry:
-# when a task was last worked on, as opposed to when it was created. The log
-# lives beside the host's task directories, written only by the host doing the
-# accessing, so — like the index — two machines can never conflict on it.
-# Entries name their own host, so a task resumed across hosts is still logged
-# correctly.
+# One row per (task, session) ctui has opened, ordered most recently accessed
+# first, carrying the first and last access times and a count.
+#
+# Two callers, one structure:
+#   * `--resume --recent` wants tasks by recency, which is this list deduped
+#     by task.
+#   * `dream` wants the sessions that could have been active on a given day.
+#     Without this it had to stat and parse every transcript on the host, at a
+#     cost that grew with total sessions rather than with the day.
+#
+# Bounded by session count rather than by an event log, so it stays small and
+# its git history stays readable. Written only by the host doing the accessing,
+# like the root index, so machines cannot conflict on it.
 # =====================================================================
 
 
-def recent_path(tasks_repo: Path, host: str | None = None) -> Path:
-    return host_dir(tasks_repo, host) / RECENT_JSON
+@dataclass
+class Access:
+    host: str
+    task_id: str
+    session_id: str | None
+    first_at: str
+    last_at: str
+    count: int = 1
+
+    @property
+    def key(self) -> tuple[str, str, str | None]:
+        return (self.host, self.task_id, self.session_id)
+
+    def to_dict(self) -> dict:
+        return {
+            "host": self.host,
+            "task_id": self.task_id,
+            "session_id": self.session_id,
+            "first_at": self.first_at,
+            "last_at": self.last_at,
+            "count": self.count,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "Access | None":
+        if not (raw.get("host") and raw.get("task_id")):
+            return None
+        last = str(raw.get("last_at") or raw.get("at") or "")
+        if not last:
+            return None
+        session = raw.get("session_id")
+        try:
+            count = int(raw.get("count", 1))
+        except (TypeError, ValueError):
+            count = 1
+        return cls(
+            host=str(raw["host"]),
+            task_id=str(raw["task_id"]),
+            session_id=str(session) if session else None,
+            first_at=str(raw.get("first_at") or last),
+            last_at=last,
+            count=count,
+        )
+
+    def _date(self, stamp: str) -> Date | None:
+        try:
+            return datetime.fromisoformat(stamp).astimezone().date()
+        except (ValueError, TypeError):
+            return None
+
+    def covers(self, day: Date) -> bool:
+        """Could this session have been active on `day`?
+
+        Deliberately generous at the upper end: access times mark when a
+        session was opened, not when it stopped, so a session opened the
+        previous evening still counts. False positives cost one transcript
+        parse; a false negative loses a day's learnings.
+        """
+        first, last = self._date(self.first_at), self._date(self.last_at)
+        if first is None or last is None:
+            return False
+        return first <= day <= last + ACCESS_SPAN_GRACE
 
 
-def read_recent(tasks_repo: Path, host: str | None = None) -> list[dict]:
-    """The access log, most recent first. Malformed entries are dropped."""
-    path = recent_path(tasks_repo, host)
+def access_path(tasks_repo: Path, host: str | None = None) -> Path:
+    return host_dir(tasks_repo, host) / ACCESS_JSON
+
+
+def read_access(tasks_repo: Path, host: str | None = None) -> list[Access]:
+    """The access index, most recently accessed first."""
+    host = host or hostname()
+    path = access_path(tasks_repo, host)
     if not path.exists():
-        return []
+        return _import_legacy_recent(tasks_repo, host)
     try:
         raw = json.loads(path.read_text())
     except (json.JSONDecodeError, OSError):
         return []
-    if not isinstance(raw, dict) or raw.get("version") != RECENT_VERSION:
+    if not isinstance(raw, dict) or raw.get("version") != ACCESS_VERSION:
         return []
     entries = raw.get("entries")
     if not isinstance(entries, list):
         return []
-    return [
-        {"host": str(e["host"]), "task_id": str(e["task_id"]), "at": str(e.get("at", ""))}
-        for e in entries
-        if isinstance(e, dict) and e.get("host") and e.get("task_id")
-    ]
+    parsed = [Access.from_dict(e) for e in entries if isinstance(e, dict)]
+    return [e for e in parsed if e is not None]
 
 
-def record_access(tasks_repo: Path, task: Task, host: str | None = None) -> None:
-    """Note that `task` was just worked on, moving it to the front of the log."""
+def _import_legacy_recent(tasks_repo: Path, host: str) -> list[Access]:
+    """Carry over the pre-index recent.json, which had no session ids.
+
+    Enough to keep `--resume --recent` working across the upgrade; those rows
+    contribute nothing to dream, which needs a session id.
+    """
+    legacy = host_dir(tasks_repo, host) / LEGACY_RECENT_JSON
+    if not legacy.exists():
+        return []
+    try:
+        raw = json.loads(legacy.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    out = []
+    for entry in raw.get("entries", []):
+        if isinstance(entry, dict):
+            parsed = Access.from_dict(entry)
+            if parsed is not None:
+                out.append(parsed)
+    return out
+
+
+def save_access(tasks_repo: Path, entries: list[Access], host: str | None = None) -> None:
     host = host or hostname()
-    entries = [
-        e for e in read_recent(tasks_repo, host)
-        if not (e["host"] == task.host and e["task_id"] == task.task_id)
-    ]
-    entries.insert(0, {
-        "host": task.host,
-        "task_id": task.task_id,
-        "at": _now().isoformat(timespec="seconds"),
-    })
-    payload = {
-        "version": RECENT_VERSION,
-        "hostname": host,
-        "entries": entries[:RECENT_CAP],
-    }
     parent = host_dir(tasks_repo, host)
     parent.mkdir(parents=True, exist_ok=True)
-    (parent / RECENT_JSON).write_text(json.dumps(payload, indent=2) + "\n")
+    payload = {
+        "version": ACCESS_VERSION,
+        "hostname": host,
+        "entries": [e.to_dict() for e in entries],
+    }
+    (parent / ACCESS_JSON).write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def record_access(tasks_repo: Path, task: Task, session_id: str | None = None,
+                  host: str | None = None) -> None:
+    """Note that `task` was just opened, moving it to the front of the index.
+
+    `session_id` is the claude session being started or resumed; None for
+    opening a shell in the task root, which counts for recency but has no
+    transcript for dream to read.
+    """
+    host = host or hostname()
+    now = _now().isoformat(timespec="seconds")
+    key = (task.host, task.task_id, session_id)
+
+    entries = read_access(tasks_repo, host)
+    kept, found = [], None
+    for entry in entries:
+        if entry.key == key:
+            found = entry
+        else:
+            kept.append(entry)
+
+    if found is None:
+        found = Access(host=task.host, task_id=task.task_id,
+                       session_id=session_id, first_at=now, last_at=now)
+    else:
+        found.last_at = now
+        found.count += 1
+
+    save_access(tasks_repo, [found, *kept], host)
 
 
 def recent_tasks(tasks_repo: Path, limit: int = 5, host: str | None = None) -> list[Task]:
     """The `limit` most recently accessed tasks, most recent first.
 
-    Entries whose task directory has since gone are skipped rather than
-    reported, so a deleted task cannot occupy a slot forever.
+    The index is per session, so it is deduped by task here. Entries whose
+    task directory has gone are skipped rather than occupying a slot.
     """
     found: list[Task] = []
-    for entry in read_recent(tasks_repo, host):
+    seen: set[tuple[str, str]] = set()
+    for entry in read_access(tasks_repo, host):
         if len(found) >= limit:
             break
+        ident = (entry.host, entry.task_id)
+        if ident in seen:
+            continue
+        seen.add(ident)
         try:
-            found.append(Task.load(host_dir(tasks_repo, entry["host"]) / entry["task_id"]))
+            found.append(Task.load(host_dir(tasks_repo, entry.host) / entry.task_id))
         except TaskError:
             continue
     return found
+
+
+def sessions_touching(tasks_repo: Path, day: Date,
+                      host: str | None = None) -> list[Access]:
+    """Indexed sessions that could have been active on `day`, oldest first."""
+    candidates = [e for e in read_access(tasks_repo, host)
+                  if e.session_id and e.covers(day)]
+    return sorted(candidates, key=lambda e: (e.task_id, e.first_at))
 
 
 def new_session_id() -> str:

@@ -10,8 +10,18 @@ from pathlib import Path
 
 from . import wiki
 from .launcher import claude_bin
-from .tasks import Task, hostname, load_tasks
-from .transcripts import SessionDigest, digest
+from .tasks import (
+    Access,
+    Task,
+    TaskError,
+    host_dir,
+    hostname,
+    load_tasks,
+    read_access,
+    save_access,
+    sessions_touching,
+)
+from .transcripts import SessionDigest, digest, record_span, transcript_path
 
 # A cron job must not wedge forever on one session.
 SESSION_TIMEOUT = 900
@@ -37,19 +47,75 @@ def cache_dir(day: Date) -> Path:
     return Path(base) / "dream" / day.isoformat()
 
 
+def ensure_access_index(tasks_repo: Path, host: str | None = None) -> int:
+    """Seed the access index for sessions it does not know about.
+
+    Sessions that predate the index — or arrived with a `git pull` — have no
+    access row, and would otherwise be invisible to `collect`. Their span is
+    recovered from the transcript's own timestamps. This is the exhaustive scan,
+    paid once, instead of on every nightly run.
+
+    Returns the number of rows added.
+    """
+    host = host or hostname()
+    known = {(e.host, e.task_id, e.session_id) for e in read_access(tasks_repo, host)}
+    rows = read_access(tasks_repo, host)
+    added = 0
+
+    for task in load_tasks(tasks_repo, host):
+        for session in task.sessions:
+            key = (task.host, task.task_id, session.session_id)
+            if key in known:
+                continue
+            span = record_span(transcript_path(task.root, session.session_id))
+            if span is None:
+                continue
+            first, last = span
+            rows.append(Access(
+                host=task.host,
+                task_id=task.task_id,
+                session_id=session.session_id,
+                first_at=datetime.combine(first, datetime.min.time()).astimezone().isoformat(),
+                last_at=datetime.combine(last, datetime.min.time()).astimezone().isoformat(),
+                count=1,
+            ))
+            known.add(key)
+            added += 1
+
+    if added:
+        rows.sort(key=lambda e: e.last_at, reverse=True)
+        save_access(tasks_repo, rows, host)
+    return added
+
+
 def collect(tasks_repo: Path, day: Date) -> list[SessionDigest]:
     """Digests of every session on this host that was active on `day`.
 
-    Scoped to this host: transcripts live on the machine that ran the session,
-    so another host's tasks have nothing to read here.
+    Candidates come from the access index, which records when each session was
+    opened — so the work scales with the sessions opened around `day` rather
+    than with every session that has ever existed on the host. The transcript is
+    still the authority on which records belong to the day; the index only
+    decides which transcripts are worth opening.
+
+    Scoped to this host: transcripts live on the machine that ran the session.
     """
+    host = hostname()
+    tasks: dict[tuple[str, str], Task | None] = {}
     digests: list[SessionDigest] = []
-    for task in sorted(load_tasks(tasks_repo, hostname()), key=lambda t: t.task_id):
-        for session in task.sessions:
-            found = digest(task.root, session.session_id, day,
-                           task.task_id, task.name)
-            if found is not None:
-                digests.append(found)
+
+    for entry in sessions_touching(tasks_repo, day, host):
+        ident = (entry.host, entry.task_id)
+        if ident not in tasks:
+            try:
+                tasks[ident] = Task.load(host_dir(tasks_repo, entry.host) / entry.task_id)
+            except TaskError:
+                tasks[ident] = None
+        task = tasks[ident]
+        if task is None:
+            continue
+        found = digest(task.root, entry.session_id, day, task.task_id, task.name)
+        if found is not None:
+            digests.append(found)
     return digests
 
 

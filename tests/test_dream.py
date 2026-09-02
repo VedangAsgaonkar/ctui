@@ -53,6 +53,7 @@ def dreamworld(tasks_repo, wiki_repo, tmp_path):
     task.add_session("aaaaaaaa-1111-2222-3333-444444444444")
     _transcript(project, "aaaaaaaa-1111-2222-3333-444444444444", DAY,
                 ["use mpmath for arbitrary precision", "put scripts in the task dir"])
+    T.record_access(tasks_repo, task, "aaaaaaaa-1111-2222-3333-444444444444")
     CFG.Config(tasks_repo=tasks_repo, wiki_repo=wiki_repo).save()
     return task
 
@@ -103,6 +104,7 @@ def test_collect_skips_sessions_without_transcripts(tasks_repo, tmp_path):
     project.mkdir()
     task = T.create_task(tasks_repo, project, "t")
     task.add_session("no-transcript-at-all")
+    T.record_access(tasks_repo, task, "no-transcript-at-all")
     assert dream.collect(tasks_repo, DAY) == []
 
 
@@ -112,6 +114,7 @@ def test_collect_is_scoped_to_this_host(tasks_repo, tmp_path):
     task = T.create_task(tasks_repo, project, "elsewhere", host="otherhost")
     task.add_session("bbbb-1111")
     _transcript(project, "bbbb-1111", DAY, ["hello"])
+    T.record_access(tasks_repo, task, "bbbb-1111", host="otherhost")
     assert dream.collect(tasks_repo, DAY) == []
 
 
@@ -275,6 +278,7 @@ def test_one_failing_session_does_not_abort_the_day(tasks_repo, wiki_repo, tmp_p
     for sid in ("1111aaaa-0000", "2222bbbb-0000"):
         task.add_session(sid)
         _transcript(project, sid, DAY, [f"message for {sid}"])
+        T.record_access(tasks_repo, task, sid)
     CFG.Config(tasks_repo=tasks_repo, wiki_repo=wiki_repo).save()
 
     failing = tmp_path / "flaky-claude"
@@ -304,3 +308,163 @@ def test_nothing_to_record_is_still_marked_done(dreamworld, wiki_repo, tmp_path,
 def test_dream_passes_through_claude_args(dreamworld, scribe):
     C.cmd_dream(day=DAY.isoformat(), extra=["--model", "opus"])
     assert _calls(scribe)[0]["argv"][-2:] == ["--model", "opus"]
+
+
+# ---- candidates come from the access index -------------------------
+
+@pytest.fixture
+def counted_parses(monkeypatch):
+    """Count transcripts opened, so 'does not scan everything' is asserted."""
+    calls = {"n": 0, "paths": []}
+    original = X.iter_records
+
+    def _iter(path):
+        calls["n"] += 1
+        calls["paths"].append(Path(path).name)
+        return original(path)
+
+    monkeypatch.setattr(X, "iter_records", _iter)
+    return calls
+
+
+def _task_with_sessions(tasks_repo, tmp_path, name, sessions, day=DAY):
+    project = tmp_path / name
+    project.mkdir(parents=True, exist_ok=True)
+    task = T.create_task(tasks_repo, project, name)
+    for sid in sessions:
+        task.add_session(sid)
+        _transcript(project, sid, day, [f"work in {sid}"])
+    return task
+
+
+def test_collect_only_opens_indexed_candidates(tasks_repo, wiki_repo, tmp_path,
+                                               counted_parses):
+    """The whole point: cost tracks the day, not the host's total sessions."""
+    old = _task_with_sessions(tasks_repo, tmp_path, "old",
+                              [f"old{i}-0000" for i in range(20)], day=BEFORE)
+    fresh = _task_with_sessions(tasks_repo, tmp_path, "fresh", ["new1-0000"])
+    T.record_access(tasks_repo, fresh, "new1-0000")
+
+    counted_parses["n"] = 0
+    got = dream.collect(tasks_repo, DAY)
+
+    assert [d.session_id for d in got] == ["new1-0000"]
+    assert counted_parses["n"] == 1                    # not 21
+    assert counted_parses["paths"] == ["new1-0000.jsonl"]
+
+
+def test_collect_ignores_sessions_indexed_for_other_days(tasks_repo, tmp_path,
+                                                         counted_parses):
+    task = _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"], day=DAY)
+    T.record_access(tasks_repo, task, "s1-0000")
+    entries = T.read_access(tasks_repo)
+    long_ago = datetime.combine(date(2026, 1, 1), datetime.min.time()).astimezone()
+    entries[0].first_at = entries[0].last_at = long_ago.isoformat()
+    T.save_access(tasks_repo, entries)
+
+    counted_parses["n"] = 0
+    assert dream.collect(tasks_repo, DAY) == []
+    assert counted_parses["n"] == 0                    # nothing even opened
+
+
+def test_backfill_seeds_sessions_that_predate_the_index(tasks_repo, tmp_path):
+    """A repo predating the index must still yield its learnings.
+
+    The span is recovered from the transcript's own timestamps, so this is the
+    exhaustive scan paid once rather than on every nightly run.
+    """
+    _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"])
+    assert not T.access_path(tasks_repo).exists()
+    assert dream.collect(tasks_repo, DAY) == []          # invisible until seeded
+
+    assert dream.ensure_access_index(tasks_repo) == 1
+    row = T.read_access(tasks_repo)[0]
+    assert row.session_id == "s1-0000"
+    assert row.covers(DAY)
+    assert [d.session_id for d in dream.collect(tasks_repo, DAY)] == ["s1-0000"]
+
+
+def test_backfill_is_idempotent(tasks_repo, tmp_path):
+    _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"])
+    assert dream.ensure_access_index(tasks_repo) == 1
+    assert dream.ensure_access_index(tasks_repo) == 0
+    assert len(T.read_access(tasks_repo)) == 1
+
+
+def test_backfill_preserves_real_access_rows(tasks_repo, tmp_path):
+    """A genuine access record must not be overwritten by a coarse span."""
+    task = _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000", "s2-0000"])
+    T.record_access(tasks_repo, task, "s1-0000")
+    exact = T.read_access(tasks_repo)[0].last_at
+
+    assert dream.ensure_access_index(tasks_repo) == 1     # only s2 is new
+    rows = {r.session_id: r for r in T.read_access(tasks_repo)}
+    assert rows["s1-0000"].last_at == exact
+    assert rows["s2-0000"].covers(DAY)
+
+
+def test_backfill_skips_sessions_without_transcripts(tasks_repo, tmp_path):
+    project = tmp_path / "t"
+    project.mkdir()
+    task = T.create_task(tasks_repo, project, "t")
+    task.add_session("ghost-0000")
+    assert dream.ensure_access_index(tasks_repo) == 0
+    assert T.read_access(tasks_repo) == []
+
+
+def test_dream_backfills_then_distils(tasks_repo, wiki_repo, tmp_path, scribe, capsys):
+    """The whole path for a repo that predates the index."""
+    _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"])
+    CFG.Config(tasks_repo=tasks_repo, wiki_repo=wiki_repo).save()
+
+    assert C.cmd_dream(day=DAY.isoformat()) == 0
+    out = capsys.readouterr().out
+    assert "indexed 1 session" in out
+    assert len(_calls(scribe)) == 1
+    assert not G.is_dirty(tasks_repo)                    # backfill was committed
+
+
+def test_index_present_but_empty_does_not_trigger_a_scan(tasks_repo, tmp_path,
+                                                         counted_parses):
+    _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"])
+    T.save_access(tasks_repo, [])                      # index exists, says nothing
+
+    counted_parses["n"] = 0
+    assert dream.collect(tasks_repo, DAY) == []
+    assert counted_parses["n"] == 0
+
+
+def test_a_session_opened_before_midnight_lands_on_the_right_day(tasks_repo, tmp_path):
+    """Opened 23:00 on the 1st, all the work done on the 2nd.
+
+    Both halves matter: the index makes it a candidate for the 1st *and* the
+    2nd (only its opening is recorded, so the span is generous), and the
+    transcript is what decides it contributes to the 2nd and not the 1st.
+    """
+    project = tmp_path / "t"
+    project.mkdir()
+    task = T.create_task(tasks_repo, project, "t")
+    task.add_session("span-0000")
+    _transcript(project, "span-0000", DAY, ["carried past midnight"])
+
+    T.record_access(tasks_repo, task, "span-0000")
+    entries = T.read_access(tasks_repo)
+    opened = datetime.combine(BEFORE, datetime.min.time()).astimezone().replace(hour=23)
+    entries[0].first_at = entries[0].last_at = opened.isoformat()
+    T.save_access(tasks_repo, entries)
+
+    assert T.sessions_touching(tasks_repo, BEFORE)          # candidate for both days
+    assert T.sessions_touching(tasks_repo, DAY)
+    assert dream.collect(tasks_repo, BEFORE) == []          # transcript decides
+    assert [d.session_id for d in dream.collect(tasks_repo, DAY)] == ["span-0000"]
+
+
+def test_collect_survives_a_deleted_task_in_the_index(tasks_repo, tmp_path):
+    import shutil
+    task = _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"])
+    other = _task_with_sessions(tasks_repo, tmp_path, "u", ["s2-0000"])
+    T.record_access(tasks_repo, task, "s1-0000")
+    T.record_access(tasks_repo, other, "s2-0000")
+    shutil.rmtree(task.dir)
+
+    assert [d.session_id for d in dream.collect(tasks_repo, DAY)] == ["s2-0000"]

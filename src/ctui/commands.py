@@ -332,7 +332,7 @@ def _pick_task(tasks: list[Task], message: str) -> Task:
 
 def _launch(task: Task, extra: list[str], tasks_repo: Path, replace: bool = True) -> int:
     session_id = register_session(task)
-    record_access(tasks_repo, task)
+    record_access(tasks_repo, task, session_id)
     gitutil.commit_all(
         tasks_repo,
         f"ctui: session {session_id[:8]} in {task.task_id} ({task.name})",
@@ -466,7 +466,8 @@ def cmd_resume(extra: list[str] | None = None, scope: str = SCOPE_LOCAL,
             continue
 
         try:
-            record_access(config.tasks_repo, task)
+            record_access(config.tasks_repo, task,
+                           None if choice == SHELL_CHOICE else choice)
             if choice == SHELL_CHOICE:
                 ui.heading(f"opening {os.environ.get('SHELL', 'a shell')} in {task.root}")
                 ui.info("(exit the shell to come back)")
@@ -534,6 +535,11 @@ def cmd_dream(day: str | None = None, extra: list[str] | None = None,
         raise CommandError(f"Expected a date like 2026-09-01, got {day!r}.") from None
 
     ui.heading(f"dream: {target.isoformat()}")
+
+    seeded = dream.ensure_access_index(config.tasks_repo)
+    if seeded:
+        ui.step(f"indexed {seeded} session(s) not previously seen")
+        gitutil.commit_all(config.tasks_repo, "ctui dream: backfill access index")
 
     digests = dream.collect(config.tasks_repo, target)
     if not digests:

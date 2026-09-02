@@ -105,6 +105,18 @@ def could_contain(path: Path, day: Date) -> bool:
     return mtime >= _day_bounds(day)[0]
 
 
+def record_span(path: Path) -> tuple[Date, Date] | None:
+    """First and last local dates present in a transcript.
+
+    Used to seed the access index for sessions that predate it, so the
+    exhaustive scan is paid once rather than every night.
+    """
+    dates = [d for d in (record_local_date(r) for r in iter_records(path)) if d]
+    if not dates:
+        return None
+    return min(dates), max(dates)
+
+
 def _blocks(message) -> list[dict]:
     """Normalise a message's content to a list of blocks."""
     if not isinstance(message, dict):
