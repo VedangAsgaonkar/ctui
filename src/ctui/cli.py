@@ -17,7 +17,10 @@ examples:
                                and launch a claude session in it
   ctui --init -n "fix parser"  ... with the name given up front
   ctui --launch                start another claude session in this task
-  ctui --resume                pick any task, then a session to resume
+  ctui --resume                resume a session in a task rooted at (or
+                               above) the current directory
+  ctui --resume --global       ... pick from every known task instead
+  ctui --resume --recent       ... pick from the 5 most recently opened
   ctui --sync                  pull and push the tasks and wiki repos
   ctui --list                  print all tasks (non-interactive)
 
@@ -43,9 +46,18 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--launch", action="store_true",
                       help="launch a new claude session in the task covering this directory")
     mode.add_argument("--resume", action="store_true",
-                      help="pick a task and resume one of its claude sessions")
+                      help="pick a task covering this directory and resume one of "
+                           "its claude sessions")
     mode.add_argument("--list", action="store_true",
                       help="list every known task")
+
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument("--global", dest="global_scope", action="store_true",
+                       help="with --resume, offer every known task instead of only "
+                            "those covering this directory")
+    scope.add_argument("--recent", action="store_true",
+                       help=f"with --resume, offer the {commands.RECENT_LIMIT} most "
+                            "recently opened tasks")
 
     parser.add_argument("-n", "--name", help="task name for --init (skips the prompt)")
     parser.add_argument("--no-launch", action="store_true",
@@ -71,6 +83,9 @@ def main(argv: list[str] | None = None) -> int:
     if extra and not (args.init or args.launch or args.resume):
         parser.error("pass-through claude arguments only apply to --init, --launch or --resume")
 
+    if (args.global_scope or args.recent) and not args.resume:
+        parser.error("--global and --recent only apply to --resume")
+
     try:
         if args.setup:
             return commands.cmd_setup()
@@ -81,7 +96,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.launch:
             return commands.cmd_launch(extra=extra)
         if args.resume:
-            return commands.cmd_resume(extra=extra)
+            if args.recent:
+                scope = commands.SCOPE_RECENT
+            elif args.global_scope:
+                scope = commands.SCOPE_GLOBAL
+            else:
+                scope = commands.SCOPE_LOCAL
+            return commands.cmd_resume(extra=extra, scope=scope)
         if args.list:
             return commands.cmd_list()
     except ui.Aborted as exc:

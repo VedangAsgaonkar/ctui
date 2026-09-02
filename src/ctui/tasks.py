@@ -27,6 +27,9 @@ ROOT_LINK = "root"
 TASK_JSON = "task.json"
 INDEX_JSON = "index.json"
 INDEX_VERSION = 1
+RECENT_JSON = "recent.json"
+RECENT_VERSION = 1
+RECENT_CAP = 50
 
 
 class TaskError(Exception):
@@ -509,6 +512,82 @@ def _same_path(a: Path, b: Path) -> bool:
         return a.resolve() == b.resolve()
     except OSError:
         return str(a) == str(b)
+
+
+# =====================================================================
+# recently accessed tasks
+#
+# `ctui --resume --recent` needs an ordering the task directories do not carry:
+# when a task was last worked on, as opposed to when it was created. The log
+# lives beside the host's task directories, written only by the host doing the
+# accessing, so — like the index — two machines can never conflict on it.
+# Entries name their own host, so a task resumed across hosts is still logged
+# correctly.
+# =====================================================================
+
+
+def recent_path(tasks_repo: Path, host: str | None = None) -> Path:
+    return host_dir(tasks_repo, host) / RECENT_JSON
+
+
+def read_recent(tasks_repo: Path, host: str | None = None) -> list[dict]:
+    """The access log, most recent first. Malformed entries are dropped."""
+    path = recent_path(tasks_repo, host)
+    if not path.exists():
+        return []
+    try:
+        raw = json.loads(path.read_text())
+    except (json.JSONDecodeError, OSError):
+        return []
+    if not isinstance(raw, dict) or raw.get("version") != RECENT_VERSION:
+        return []
+    entries = raw.get("entries")
+    if not isinstance(entries, list):
+        return []
+    return [
+        {"host": str(e["host"]), "task_id": str(e["task_id"]), "at": str(e.get("at", ""))}
+        for e in entries
+        if isinstance(e, dict) and e.get("host") and e.get("task_id")
+    ]
+
+
+def record_access(tasks_repo: Path, task: Task, host: str | None = None) -> None:
+    """Note that `task` was just worked on, moving it to the front of the log."""
+    host = host or hostname()
+    entries = [
+        e for e in read_recent(tasks_repo, host)
+        if not (e["host"] == task.host and e["task_id"] == task.task_id)
+    ]
+    entries.insert(0, {
+        "host": task.host,
+        "task_id": task.task_id,
+        "at": _now().isoformat(timespec="seconds"),
+    })
+    payload = {
+        "version": RECENT_VERSION,
+        "hostname": host,
+        "entries": entries[:RECENT_CAP],
+    }
+    parent = host_dir(tasks_repo, host)
+    parent.mkdir(parents=True, exist_ok=True)
+    (parent / RECENT_JSON).write_text(json.dumps(payload, indent=2) + "\n")
+
+
+def recent_tasks(tasks_repo: Path, limit: int = 5, host: str | None = None) -> list[Task]:
+    """The `limit` most recently accessed tasks, most recent first.
+
+    Entries whose task directory has since gone are skipped rather than
+    reported, so a deleted task cannot occupy a slot forever.
+    """
+    found: list[Task] = []
+    for entry in read_recent(tasks_repo, host):
+        if len(found) >= limit:
+            break
+        try:
+            found.append(Task.load(host_dir(tasks_repo, entry["host"]) / entry["task_id"]))
+        except TaskError:
+            continue
+    return found
 
 
 def new_session_id() -> str:

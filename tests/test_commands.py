@@ -325,7 +325,7 @@ def test_launch_disambiguates_multiple_tasks(config, project, answers, fake_clau
 def test_resume_lists_tasks_then_sessions(config, project, answers, fake_claude, monkeypatch):
     task = T.create_task(config.tasks_repo, project, "t")
     task.add_session("aaaaaaaa-0000-0000-0000-000000000000")
-    monkeypatch.chdir(Path.home())
+    monkeypatch.chdir(project)
 
     answers["select"] = [
         lambda choices: choices[0].value,
@@ -348,11 +348,12 @@ def test_resume_spans_hosts(config, project, answers, fake_claude, monkeypatch):
         lambda choices: next(c.value for c in choices if c.value.host == "otherhost"),
         "bbbbbbbb-0000-0000-0000-000000000000",
     ]
-    assert C.cmd_resume(replace=False) == 0
+    assert C.cmd_resume(scope=C.SCOPE_GLOBAL, replace=False) == 0
 
 
 def test_resume_shows_task_id_and_name(config, project, answers, monkeypatch):
     task = T.create_task(config.tasks_repo, project, "the name")
+    monkeypatch.chdir(project)
     titles = {}
 
     answers["select"] = [
@@ -361,7 +362,6 @@ def test_resume_shows_task_id_and_name(config, project, answers, monkeypatch):
         C.SHELL_CHOICE,
     ]
     monkeypatch.setenv("SHELL", "/bin/true")
-    monkeypatch.chdir(Path.home())
     C.cmd_resume(replace=False)
     assert any(task.task_id in t and "the name" in t for t in titles["t"])
 
@@ -369,12 +369,12 @@ def test_resume_shows_task_id_and_name(config, project, answers, monkeypatch):
 def test_resume_can_open_a_shell_in_the_task_root(config, project, answers,
                                                   tmp_path, monkeypatch):
     T.create_task(config.tasks_repo, project, "t")
+    monkeypatch.chdir(project)
     marker = tmp_path / "cwd.txt"
     shell = tmp_path / "sh"
     shell.write_text(f'#!/bin/sh\necho "$PWD" > "{marker}"\n')
     shell.chmod(0o755)
     monkeypatch.setenv("SHELL", str(shell))
-    monkeypatch.chdir(Path.home())
 
     answers["select"] = [lambda choices: choices[0].value, C.SHELL_CHOICE]
     assert C.cmd_resume(replace=False) == 0
@@ -385,7 +385,7 @@ def test_resume_back_returns_to_the_task_list(config, project, answers,
                                               fake_claude, monkeypatch):
     task = T.create_task(config.tasks_repo, project, "t")
     task.add_session("cccccccc-0000-0000-0000-000000000000")
-    monkeypatch.chdir(Path.home())
+    monkeypatch.chdir(project)
 
     answers["select"] = [
         lambda choices: choices[0].value,
@@ -398,7 +398,7 @@ def test_resume_back_returns_to_the_task_list(config, project, answers,
 
 def test_resume_with_no_tasks_errors(config, monkeypatch):
     with pytest.raises(C.CommandError, match="ctui --init"):
-        C.cmd_resume(replace=False)
+        C.cmd_resume(scope=C.SCOPE_GLOBAL, replace=False)
 
 
 def test_resume_flags_a_task_whose_root_is_missing(config, tmp_path, answers, monkeypatch):
@@ -410,7 +410,7 @@ def test_resume_flags_a_task_whose_root_is_missing(config, tmp_path, answers, mo
 
     answers["select"] = [lambda choices: choices[0].value]
     answers["confirm"] = [False]     # decline picking another task
-    assert C.cmd_resume(replace=False) == 1
+    assert C.cmd_resume(scope=C.SCOPE_GLOBAL, replace=False) == 1
 
 
 # ---- list ----------------------------------------------------------
@@ -517,3 +517,162 @@ def test_sync_refuses_a_non_repo_instead_of_using_the_parent(tmp_path, capsys):
     assert C.cmd_sync() == 1
     assert "not a git repo" in capsys.readouterr().err
     assert G.run(home, "log", "-1", "--pretty=%s").out == "dotfiles"
+
+
+# ---- resume scopes -------------------------------------------------
+
+def test_resume_defaults_to_tasks_covering_cwd(config, project, tmp_path, answers,
+                                               fake_claude, monkeypatch):
+    here = T.create_task(config.tasks_repo, project, "here")
+    here.add_session("11111111-0000-0000-0000-000000000000")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    T.create_task(config.tasks_repo, elsewhere, "elsewhere")
+
+    monkeypatch.chdir(project)
+    offered = {}
+    answers["select"] = [
+        lambda choices: (offered.setdefault("t", [c.value.name for c in choices]),
+                         choices[0].value)[1],
+        "11111111-0000-0000-0000-000000000000",
+    ]
+    assert C.cmd_resume(replace=False) == 0
+    assert offered["t"] == ["here"]          # the other task is not offered
+
+
+def test_resume_walks_up_from_a_subdirectory(config, project, answers,
+                                             fake_claude, monkeypatch):
+    task = T.create_task(config.tasks_repo, project, "t")
+    task.add_session("22222222-0000-0000-0000-000000000000")
+    monkeypatch.chdir(project / "sub" / "deep")
+
+    answers["select"] = [lambda choices: choices[0].value,
+                         "22222222-0000-0000-0000-000000000000"]
+    assert C.cmd_resume(replace=False) == 0
+
+
+def test_resume_outside_any_task_points_at_global(config, project, tmp_path, monkeypatch):
+    T.create_task(config.tasks_repo, project, "t")
+    away = tmp_path / "away"
+    away.mkdir()
+    monkeypatch.chdir(away)
+
+    with pytest.raises(C.CommandError, match=r"--resume --global"):
+        C.cmd_resume(replace=False)
+
+
+def test_resume_global_offers_everything(config, project, tmp_path, answers,
+                                         fake_claude, monkeypatch):
+    T.create_task(config.tasks_repo, project, "here")
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    other = T.create_task(config.tasks_repo, elsewhere, "elsewhere")
+    other.add_session("33333333-0000-0000-0000-000000000000")
+
+    monkeypatch.chdir(project)
+    offered = {}
+    answers["select"] = [
+        lambda choices: (offered.setdefault("t", {c.value.name for c in choices}),
+                         next(c.value for c in choices if c.value.name == "elsewhere"))[1],
+        "33333333-0000-0000-0000-000000000000",
+    ]
+    assert C.cmd_resume(scope=C.SCOPE_GLOBAL, replace=False) == 0
+    assert offered["t"] == {"here", "elsewhere"}
+
+
+def test_resume_recent_offers_the_five_most_recent(config, tmp_path, answers,
+                                                   fake_claude, monkeypatch):
+    tasks = []
+    for i in range(7):
+        p = tmp_path / "projects" / f"p{i}"
+        p.mkdir(parents=True)
+        task = T.create_task(config.tasks_repo, p, f"t{i}")
+        task.add_session(f"{i}{i}{i}{i}{i}{i}{i}{i}-0000-0000-0000-000000000000")
+        T.record_access(config.tasks_repo, task)
+        tasks.append(task)
+
+    monkeypatch.chdir(tmp_path)
+    offered = {}
+    answers["select"] = [
+        lambda choices: (offered.setdefault("t", [c.value.name for c in choices]),
+                         choices[0].value)[1],
+        "66666666-0000-0000-0000-000000000000",
+    ]
+    assert C.cmd_resume(scope=C.SCOPE_RECENT, replace=False) == 0
+    assert offered["t"] == ["t6", "t5", "t4", "t3", "t2"]   # newest first, 5 of 7
+
+
+def test_resume_recent_with_empty_log_points_at_global(config, project, monkeypatch):
+    T.create_task(config.tasks_repo, project, "t")
+    monkeypatch.chdir(project)
+    with pytest.raises(C.CommandError, match=r"--resume --global"):
+        C.cmd_resume(scope=C.SCOPE_RECENT, replace=False)
+
+
+def test_resume_prompt_names_the_scope(config, project, answers, monkeypatch):
+    task = T.create_task(config.tasks_repo, project, "t")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("SHELL", "/bin/true")
+    seen = {}
+
+    def _select(message, choices, default=None):
+        seen.setdefault("messages", []).append(message)
+        return choices[0].value if len(seen["messages"]) == 1 else C.SHELL_CHOICE
+
+    monkeypatch.setattr(ui, "ask_select", _select)
+    C.cmd_resume(replace=False)
+    assert C._tilde(project.resolve()) in seen["messages"][0]
+
+
+def test_tilde_abbreviates_only_under_home(tmp_path):
+    assert C._tilde(Path.home() / "proj" / "x") == "~/proj/x"
+    assert C._tilde(Path("/elsewhere/proj")) == "/elsewhere/proj"
+
+
+# ---- access recording ----------------------------------------------
+
+def test_launching_records_an_access(config, project, fake_claude, monkeypatch):
+    task = T.create_task(config.tasks_repo, project, "t")
+    monkeypatch.chdir(project)
+    assert T.recent_tasks(config.tasks_repo) == []
+
+    C.cmd_launch(replace=False)
+    assert [t.task_id for t in T.recent_tasks(config.tasks_repo)] == [task.task_id]
+
+
+def test_init_records_an_access(config, project, fake_claude, monkeypatch):
+    monkeypatch.chdir(project)
+    C.cmd_init(name="t", replace=False)
+    assert [t.name for t in T.recent_tasks(config.tasks_repo)] == ["t"]
+
+
+def test_resuming_records_an_access(config, project, answers, fake_claude, monkeypatch):
+    task = T.create_task(config.tasks_repo, project, "t")
+    task.add_session("44444444-0000-0000-0000-000000000000")
+    monkeypatch.chdir(project)
+
+    answers["select"] = [lambda choices: choices[0].value,
+                         "44444444-0000-0000-0000-000000000000"]
+    C.cmd_resume(replace=False)
+    assert [t.task_id for t in T.recent_tasks(config.tasks_repo)] == [task.task_id]
+
+
+def test_opening_a_shell_records_an_access(config, project, answers, monkeypatch):
+    task = T.create_task(config.tasks_repo, project, "t")
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("SHELL", "/bin/true")
+
+    answers["select"] = [lambda choices: choices[0].value, C.SHELL_CHOICE]
+    C.cmd_resume(replace=False)
+    assert [t.task_id for t in T.recent_tasks(config.tasks_repo)] == [task.task_id]
+
+
+def test_access_log_is_committed(config, project, fake_claude, monkeypatch):
+    T.create_task(config.tasks_repo, project, "t")
+    G.commit_all(config.tasks_repo, "task")
+    monkeypatch.chdir(project)
+
+    C.cmd_launch(replace=False)
+    assert not G.is_dirty(config.tasks_repo)
+    tracked = G.run(config.tasks_repo, "ls-files").out
+    assert "recent.json" in tracked

@@ -101,3 +101,44 @@ def test_ctuirc_without_tasks_repo_is_reported(monkeypatch, tmp_path, capsys):
     monkeypatch.setenv("CTUI_RC", str(rc))
     assert cli.main(["--list"]) == 1
     assert "tasks_repo" in capsys.readouterr().err
+
+
+# ---- resume scope flags --------------------------------------------
+
+@pytest.mark.parametrize("argv,expected", [
+    (["--resume"], "local"),
+    (["--resume", "--global"], "global"),
+    (["--resume", "--recent"], "recent"),
+])
+def test_resume_scope_flags(argv, expected, monkeypatch):
+    seen = {}
+    monkeypatch.setattr(C, "cmd_resume", lambda **kw: (seen.update(kw), 0)[1])
+    assert cli.main(argv) == 0
+    assert seen["scope"] == expected
+
+
+def test_global_and_recent_are_mutually_exclusive(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--resume", "--global", "--recent"])
+    assert "not allowed with" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--global", "--recent"])
+def test_scope_flags_require_resume(flag, capsys):
+    with pytest.raises(SystemExit):
+        cli.main([flag])
+    assert "only apply to --resume" in capsys.readouterr().err
+
+
+def test_scope_flags_reject_other_modes(capsys):
+    with pytest.raises(SystemExit):
+        cli.main(["--list", "--global"])
+    assert "only apply to --resume" in capsys.readouterr().err
+
+
+def test_resume_still_takes_passthrough_args(monkeypatch):
+    seen = {}
+    monkeypatch.setattr(C, "cmd_resume", lambda **kw: (seen.update(kw), 0)[1])
+    assert cli.main(["--resume", "--global", "--", "--model", "opus"]) == 0
+    assert seen["extra"] == ["--model", "opus"]
+    assert seen["scope"] == "global"

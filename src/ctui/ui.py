@@ -62,15 +62,29 @@ def ask_confirm(message: str, default: bool = True) -> bool:
     return bool(_unwrap(questionary.confirm(message, default=default, style=STYLE).ask()))
 
 
-def ask_select(message: str, choices: list[Choice], default=None):
+def ask_select(message: str, choices: list[Choice], default=None,
+               filterable: bool = True):
+    """A select prompt; typing filters the list by substring.
+
+    questionary matches the typed text against each choice's rendered title
+    (case-insensitively), so for the task list that covers the task id, name and
+    host at once. j/k must be off: with type-to-filter they would be swallowed
+    as filter text, and questionary raises if both are enabled.
+    """
     require_interactive(message)
+    if filterable:
+        instruction = "(↑/↓ to move, type to filter, enter to select)"
+    else:
+        instruction = "(↑/↓ to move, enter to select)"
     return _unwrap(questionary.select(
         message,
         choices=choices,
         default=default,
         style=STYLE,
         use_shortcuts=False,
-        instruction="(↑/↓ to move, enter to select)",
+        use_jk_keys=not filterable,
+        use_search_filter=filterable,
+        instruction=instruction,
     ).ask())
 
 

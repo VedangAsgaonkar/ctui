@@ -30,6 +30,8 @@ from .tasks import (
     find_tasks_from_cwd,
     hostname,
     load_tasks,
+    record_access,
+    recent_tasks,
     tasks_for_root,
 )
 
@@ -280,6 +282,7 @@ def _pick_task(tasks: list[Task], message: str) -> Task:
 
 def _launch(task: Task, extra: list[str], tasks_repo: Path, replace: bool = True) -> int:
     session_id = register_session(task)
+    record_access(tasks_repo, task)
     gitutil.commit_all(
         tasks_repo,
         f"ctui: session {session_id[:8]} in {task.task_id} ({task.name})",
@@ -315,6 +318,11 @@ def cmd_launch(extra: list[str] | None = None, replace: bool = True) -> int:
 SHELL_CHOICE = "__shell__"
 BACK_CHOICE = "__back__"
 
+SCOPE_LOCAL = "local"
+SCOPE_GLOBAL = "global"
+SCOPE_RECENT = "recent"
+RECENT_LIMIT = 5
+
 
 def _task_choices(tasks: list[Task]) -> list[Choice]:
     this_host = hostname()
@@ -347,17 +355,52 @@ def _session_choices(task: Task) -> list[Choice]:
     return choices
 
 
-def cmd_resume(extra: list[str] | None = None, replace: bool = True) -> int:
-    config = load()
-    tasks = load_tasks(config.tasks_repo)
-    if not tasks:
-        raise CommandError(
+def _tilde(path: Path) -> str:
+    """Abbreviate the home prefix, to keep prompt labels readable."""
+    try:
+        return f"~/{path.relative_to(Path.home())}"
+    except ValueError:
+        return str(path)
+
+
+def _resume_candidates(config, scope: str) -> tuple[list[Task], str]:
+    """Tasks to offer for the given scope, plus a label for the prompt."""
+    if scope == SCOPE_RECENT:
+        tasks = recent_tasks(config.tasks_repo, RECENT_LIMIT)
+        return tasks, f"{RECENT_LIMIT} most recently accessed"
+    if scope == SCOPE_GLOBAL:
+        return load_tasks(config.tasks_repo), "all tasks"
+    cwd = Path.cwd().resolve()
+    return find_tasks_from_cwd(config.tasks_repo, cwd), f"rooted at {_tilde(cwd)}"
+
+
+def _no_candidates_error(config, scope: str) -> CommandError:
+    if scope == SCOPE_RECENT:
+        return CommandError(
+            "No tasks have been opened on this machine yet.\n"
+            "Try `ctui --resume --global` to pick from every task."
+        )
+    if scope == SCOPE_GLOBAL:
+        return CommandError(
             f"No tasks found in {config.tasks_repo}.\n"
             "Run `ctui --init` in a project directory to create one."
         )
+    return CommandError(
+        f"No ctui task covers {Path.cwd().resolve()}.\n"
+        "Run `ctui --init` here to create one, or `ctui --resume --global` "
+        "to pick from every task."
+    )
+
+
+def cmd_resume(extra: list[str] | None = None, scope: str = SCOPE_LOCAL,
+               replace: bool = True) -> int:
+    config = load()
+    tasks, label = _resume_candidates(config, scope)
+    if not tasks:
+        raise _no_candidates_error(config, scope)
 
     while True:
-        task = _pick_task_for_resume(tasks)
+        task = _pick_task_for_resume(tasks, label)
         if not task.root_exists:
             ui.warn(f"task root {task.root} does not exist on this machine ({hostname()}).")
             if not ui.ask_confirm("Pick a different task?", default=True):
@@ -373,6 +416,7 @@ def cmd_resume(extra: list[str] | None = None, replace: bool = True) -> int:
             continue
 
         try:
+            record_access(config.tasks_repo, task)
             if choice == SHELL_CHOICE:
                 ui.heading(f"opening {os.environ.get('SHELL', 'a shell')} in {task.root}")
                 ui.info("(exit the shell to come back)")
@@ -383,8 +427,8 @@ def cmd_resume(extra: list[str] | None = None, replace: bool = True) -> int:
             raise CommandError(str(exc)) from exc
 
 
-def _pick_task_for_resume(tasks: list[Task]) -> Task:
-    return ui.ask_select("Select a task:", _task_choices(tasks))
+def _pick_task_for_resume(tasks: list[Task], label: str) -> Task:
+    return ui.ask_select(f"Select a task ({label}):", _task_choices(tasks))
 
 
 # =====================================================================
