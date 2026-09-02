@@ -98,19 +98,21 @@ and the entry uses absolute paths because cron runs with a near-empty environmen
 
 For a given day (default: yesterday) it:
 
-1. Finds every session active that day. Candidates come from the [access
-   index](#the-access-index), so the work scales with the sessions opened around that
-   day rather than with every session on the host. A candidate's transcript is at
-   `~/.claude/projects/<root with / as ->/<session-id>.jsonl`, reconstructible from
-   the task root and the session ids in `task.json`. Transcript timestamps are UTC, so
-   they are converted to local dates before bucketing, and an mtime check skips files
-   that cannot contain the day.
+1. Finds every session active that day, from this host's tasks and the session ids in
+   their `task.json`. A session's transcript is at
+   `~/.claude/projects/<root with / as ->/<session-id>.jsonl`, so no bookkeeping is
+   needed to locate it. Whether it is worth parsing is decided from the file itself,
+   from both directions: its mtime cannot precede a record it holds (one stat), and
+   its first record cannot postdate the day (one line). Transcript timestamps are UTC,
+   so they are converted to local dates before bucketing. On 2000 sessions, the
+   first-record bound alone cuts a run by ~37% versus filtering on mtime only, because
+   a transcript that started later is rejected after one line instead of a full parse.
 2. Digests each one: user messages verbatim, assistant prose, and the tool *calls*.
    Tool *results* and thinking blocks are dropped, which is most of the volume — a
    53 KB transcript becomes ~5 KB. Digests are staged under `~/.cache/ctui/dream/`.
 3. Runs a claude session per digest, in the wiki repo, appending to
-   `dated/<date>.md`. Each run sees what earlier ones wrote, so the page accumulates
-   rather than being rewritten.
+   `dated/<hostname>/<date>.md`. Each run sees what earlier ones wrote, so the page
+   accumulates rather than being rewritten.
 4. Records each session in `## Sessions folded in`, then commits.
 
 `--dream --dry-run` stages the digests and reports without calling claude, and
@@ -217,8 +219,8 @@ every `ctui --sync`. Each host only ever writes its own.
 
 ### The access index
 
-`access.json` sits beside it: one row per `(task, session)` ctui has opened, ordered
-most recently accessed first, with the first and last access times and a count.
+`access.json` sits beside it: one row per task ctui has opened, ordered most recently
+accessed first, with the first and last access times and a count.
 
 ```json
 {
@@ -226,54 +228,22 @@ most recently accessed first, with the first and last access times and a count.
   "hostname": "furiosa.stanford.edu",
   "entries": [
     {"host": "furiosa.stanford.edu", "task_id": "TASK_20260902_004505",
-     "session_id": "95a18469-…", "first_at": "2026-09-02T00:45:05-07:00",
-     "last_at": "2026-09-02T09:12:44-07:00", "count": 3,
-     "state": "closed", "activity_at": "2026-09-02T09:41:02-07:00"}
+     "first_at": "2026-09-02T00:45:05-07:00",
+     "last_at": "2026-09-02T09:12:44-07:00", "count": 3}
   ]
 }
 ```
 
-`--init`, `--launch` and `--resume` all record (opening a shell counts for recency but
-has no `session_id`, since there is no transcript). Re-opening bumps a row in place
-rather than appending, so the file is bounded by session count.
+This exists solely for `ctui --resume --recent`, which needs an ordering the task
+directories cannot give: `TASK_<datetime>` is creation time, not last use. `--init`,
+`--launch` and `--resume` all record; re-opening bumps a row in place rather than
+appending, so the file is bounded by task count.
 
-Two callers, one structure:
-
-- **`--resume --recent`** wants tasks by recency — this list, deduped by task. It is
-  an ordering the task directories cannot give: `TASK_<datetime>` is creation time,
-  not last use.
-- **`--dream`** wants the sessions that could have been active on a day. Without this
-  it had to stat and parse *every* transcript on the host, at a cost that grew with
-  total sessions rather than with the day: at 302 sessions, 302 parses / ~830 ms
-  versus 2 parses / ~10 ms.
-
-Each row also carries a `state` of `open` or `closed`, and `activity_at` — the last
-write seen on its transcript. This is what bounds day coverage:
-
-- **closed** — covers first access through `activity_at`, exactly. A session that
-  finished yesterday is not a candidate today.
-- **open** — covers first access through today, since it may be running right now. A
-  false positive costs one transcript check; a false negative loses a day's learnings.
-
-ctui `exec`s claude and so never observes a session ending, but it does not need to:
-the transcript's last write *is* when activity stopped, which is all day coverage
-depends on. `--dream` calls `reconcile_access`, which stats each open row's transcript
-and closes any that has been idle for three days, recording that write as
-`activity_at`. Stat only, never a parse. It is self-correcting — a closed session
-written to again is reopened — and `--launch`/`--resume` reopen a row directly.
-
-At 2003 sessions of which 3 ran today, this takes the candidate set from 2003 rows to
-3, and the filesystem checks with it (263 ms → 36 ms). It does not reduce transcript
-*parsing*, which the mtime pre-filter in step 1 was already preventing; what it buys
-is not touching the filesystem for rows that cannot qualify, and an exact upper bound
-in place of a heuristic grace day.
-
-The transcript remains the authority on which records belong to which day; the index
-only decides which transcripts are worth opening.
-
-Sessions the index has never seen — predating it, or arrived by `git pull` — are
-seeded on the next `--dream` from their transcript's own timestamp span, so the
-exhaustive scan is paid once instead of nightly.
+`--dream` deliberately reads none of it. An earlier version tracked per-session rows
+with open/closed state so that dream could pick candidates without touching the
+filesystem, and measurement showed it saved stat calls but **no transcript parses at
+all** — the transcripts' own timestamps were already doing the filtering. It was
+deleted; dream consults the transcripts directly.
 
 Like the root index it is written only by the host doing the accessing, so two
 machines cannot conflict on it, and rows name their own host so a task resumed across
@@ -288,11 +258,15 @@ session is recorded in `task.json` *before* it starts rather than scraped afterw
 ```
 ctui-wiki/
 └── dated/
-    ├── 2026-09-01.md
-    └── 2026-09-02.md
+    └── furiosa.stanford.edu/
+        ├── 2026-09-01.md
+        └── 2026-09-02.md
 ```
 
-One page per day, written by `ctui --dream`. Each has fixed headings — Libraries &
+One page per day **per host**, written by `ctui --dream`. A machine only ever writes
+its own directory, using only the sessions of its own tasks, so two hosts distilling
+the same night cannot conflict on `ctui --sync`. The hostname sits under `dated/`
+rather than above it, leaving other wiki sections at the top level. Each has fixed headings — Libraries &
 tools, Commands & workflows, Metrics & evaluation, Codebase notes, Practices &
 conventions, Steering & preferences — so pages stay comparable and each kind of
 learning has an obvious home. A section with nothing for it is left empty rather than

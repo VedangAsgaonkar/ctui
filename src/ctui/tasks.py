@@ -18,11 +18,8 @@ import platform
 import socket
 import uuid
 from dataclasses import dataclass, field
-from datetime import date as Date
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-
-from .transcripts import transcript_path
 
 TASK_PREFIX = "TASK_"
 TASK_STAMP_FMT = "%Y%m%d_%H%M%S"
@@ -34,22 +31,6 @@ ACCESS_JSON = "access.json"
 ACCESS_VERSION = 1
 LEGACY_RECENT_JSON = "recent.json"
 
-STATE_OPEN = "open"
-STATE_CLOSED = "closed"
-
-# ctui execs claude, so it never observes a session ending. A session whose
-# transcript has not been written for this long is treated as closed, with its
-# last write as the close time — which is what a session's end *means* for the
-# purpose of deciding which days it touched.
-#
-# Generous on purpose: a session left open across a weekend is still a session
-# someone intends to come back to, and closing it early only costs precision at
-# the upper bound of its coverage (never a lost day, since coverage for an open
-# row runs to today).
-IDLE_CLOSE = timedelta(days=3)
-
-# Fallback span for a session still considered open: it may be running right
-# now, so it could have touched any day up to today.
 
 
 class TaskError(Exception):
@@ -555,96 +536,46 @@ def _same_path(a: Path, b: Path) -> bool:
 
 @dataclass
 class Access:
+    """When a task was opened. Ordering only — `dream` does not read this."""
+
     host: str
     task_id: str
-    session_id: str | None
     first_at: str
     last_at: str
     count: int = 1
-    state: str = STATE_OPEN
-    # Last transcript write seen for this session; the authoritative end of its
-    # activity once closed. None until the row has been reconciled.
-    activity_at: str | None = None
 
     @property
-    def key(self) -> tuple[str, str, str | None]:
-        return (self.host, self.task_id, self.session_id)
-
-    @property
-    def closed(self) -> bool:
-        return self.state == STATE_CLOSED
+    def key(self) -> tuple[str, str]:
+        return (self.host, self.task_id)
 
     def to_dict(self) -> dict:
         return {
             "host": self.host,
             "task_id": self.task_id,
-            "session_id": self.session_id,
             "first_at": self.first_at,
             "last_at": self.last_at,
             "count": self.count,
-            "state": self.state,
-            "activity_at": self.activity_at,
         }
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Access | None":
         if not (raw.get("host") and raw.get("task_id")):
             return None
+        # `at` is the pre-index recent.json field.
         last = str(raw.get("last_at") or raw.get("at") or "")
         if not last:
             return None
-        session = raw.get("session_id")
         try:
             count = int(raw.get("count", 1))
         except (TypeError, ValueError):
             count = 1
-        state = str(raw.get("state") or STATE_OPEN)
-        if state not in (STATE_OPEN, STATE_CLOSED):
-            state = STATE_OPEN
         return cls(
             host=str(raw["host"]),
             task_id=str(raw["task_id"]),
-            session_id=str(session) if session else None,
             first_at=str(raw.get("first_at") or last),
             last_at=last,
             count=count,
-            state=state,
-            activity_at=str(raw["activity_at"]) if raw.get("activity_at") else None,
         )
-
-    def _date(self, stamp: str | None) -> Date | None:
-        if not stamp:
-            return None
-        try:
-            return datetime.fromisoformat(stamp).astimezone().date()
-        except (ValueError, TypeError):
-            return None
-
-    def last_day(self, today: Date | None = None) -> Date | None:
-        """The last day this session could have been active.
-
-        Closed: the day of its final transcript write, which is exact. Still
-        open: today, since it may be running right now.
-        """
-        if self.closed:
-            return (self._date(self.activity_at)
-                    or self._date(self.last_at))
-        return today or datetime.now().astimezone().date()
-
-    def covers(self, day: Date, today: Date | None = None) -> bool:
-        """Could this session have been active on `day`?
-
-        For a closed session this is exact — first access through last write —
-        so a session that finished yesterday is not a candidate for today. An
-        open session is treated generously, because it may still be running;
-        a false positive costs one transcript parse, a false negative loses a
-        day's learnings.
-        """
-        first = self._date(self.first_at)
-        last = self.last_day(today)
-        if first is None or last is None:
-            return False
-        return first <= day <= last
 
 
 def access_path(tasks_repo: Path, host: str | None = None) -> Path:
@@ -706,21 +637,14 @@ def save_access(tasks_repo: Path, entries: list[Access], host: str | None = None
     (parent / ACCESS_JSON).write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def record_access(tasks_repo: Path, task: Task, session_id: str | None = None,
-                  host: str | None = None) -> None:
-    """Note that `task` was just opened, moving it to the front of the index.
-
-    `session_id` is the claude session being started or resumed; None for
-    opening a shell in the task root, which counts for recency but has no
-    transcript for dream to read.
-    """
+def record_access(tasks_repo: Path, task: Task, host: str | None = None) -> None:
+    """Note that `task` was just opened, moving it to the front of the index."""
     host = host or hostname()
     now = _now().isoformat(timespec="seconds")
-    key = (task.host, task.task_id, session_id)
+    key = (task.host, task.task_id)
 
-    entries = read_access(tasks_repo, host)
     kept, found = [], None
-    for entry in entries:
+    for entry in read_access(tasks_repo, host):
         if entry.key == key:
             found = entry
         else:
@@ -728,13 +652,10 @@ def record_access(tasks_repo: Path, task: Task, session_id: str | None = None,
 
     if found is None:
         found = Access(host=task.host, task_id=task.task_id,
-                       session_id=session_id, first_at=now, last_at=now)
+                       first_at=now, last_at=now)
     else:
         found.last_at = now
         found.count += 1
-        # Being opened again, so the previous close no longer bounds it.
-        found.state = STATE_OPEN
-        found.activity_at = None
 
     save_access(tasks_repo, [found, *kept], host)
 
@@ -759,66 +680,6 @@ def recent_tasks(tasks_repo: Path, limit: int = 5, host: str | None = None) -> l
         except TaskError:
             continue
     return found
-
-
-def reconcile_access(tasks_repo: Path, host: str | None = None) -> int:
-    """Close out sessions whose transcripts have gone idle. Returns rows changed.
-
-    Stat only — never a parse. ctui execs claude and so cannot see a session
-    end, but the transcript's last write says when activity stopped, which is
-    the only thing day coverage needs. Self-correcting: if a session marked
-    closed is written to again, this reopens it.
-    """
-    host = host or hostname()
-    rows = read_access(tasks_repo, host)
-    if not rows:
-        return 0
-
-    now = datetime.now().astimezone()
-    roots: dict[tuple[str, str], Path | None] = {}
-    changed = 0
-
-    for row in rows:
-        if not row.session_id:
-            continue                      # a shell; nothing to observe
-        ident = (row.host, row.task_id)
-        if ident not in roots:
-            try:
-                roots[ident] = Task.load(host_dir(tasks_repo, row.host) / row.task_id).root
-            except TaskError:
-                roots[ident] = None
-        root = roots[ident]
-        if root is None:
-            continue
-
-        try:
-            mtime = datetime.fromtimestamp(
-                transcript_path(root, row.session_id).stat().st_mtime).astimezone()
-        except OSError:
-            continue                      # no transcript here to judge by
-
-        stamp = mtime.isoformat(timespec="seconds")
-        idle = now - mtime >= IDLE_CLOSE
-
-        if idle and (not row.closed or row.activity_at != stamp):
-            row.state, row.activity_at = STATE_CLOSED, stamp
-            changed += 1
-        elif not idle and row.closed:
-            # Written to since we closed it: it is live again.
-            row.state, row.activity_at = STATE_OPEN, stamp
-            changed += 1
-
-    if changed:
-        save_access(tasks_repo, rows, host)
-    return changed
-
-
-def sessions_touching(tasks_repo: Path, day: Date,
-                      host: str | None = None) -> list[Access]:
-    """Indexed sessions that could have been active on `day`, oldest first."""
-    candidates = [e for e in read_access(tasks_repo, host)
-                  if e.session_id and e.covers(day)]
-    return sorted(candidates, key=lambda e: (e.task_id, e.first_at))
 
 
 def new_session_id() -> str:

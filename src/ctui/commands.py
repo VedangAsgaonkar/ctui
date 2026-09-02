@@ -35,7 +35,6 @@ from .tasks import (
     find_tasks_from_cwd,
     hostname,
     load_tasks,
-    reconcile_access,
     record_access,
     recent_tasks,
     tasks_for_root,
@@ -333,7 +332,7 @@ def _pick_task(tasks: list[Task], message: str) -> Task:
 
 def _launch(task: Task, extra: list[str], tasks_repo: Path, replace: bool = True) -> int:
     session_id = register_session(task)
-    record_access(tasks_repo, task, session_id)
+    record_access(tasks_repo, task)
     gitutil.commit_all(
         tasks_repo,
         f"ctui: session {session_id[:8]} in {task.task_id} ({task.name})",
@@ -467,8 +466,7 @@ def cmd_resume(extra: list[str] | None = None, scope: str = SCOPE_LOCAL,
             continue
 
         try:
-            record_access(config.tasks_repo, task,
-                           None if choice == SHELL_CHOICE else choice)
+            record_access(config.tasks_repo, task)
             if choice == SHELL_CHOICE:
                 ui.heading(f"opening {os.environ.get('SHELL', 'a shell')} in {task.root}")
                 ui.info("(exit the shell to come back)")
@@ -535,25 +533,15 @@ def cmd_dream(day: str | None = None, extra: list[str] | None = None,
     except ValueError:
         raise CommandError(f"Expected a date like 2026-09-01, got {day!r}.") from None
 
-    ui.heading(f"dream: {target.isoformat()}")
-
-    seeded = dream.ensure_access_index(config.tasks_repo)
-    # Close out sessions whose transcripts have gone idle, so a session that
-    # finished yesterday stops being a candidate for today. Stat only.
-    settled = reconcile_access(config.tasks_repo)
-    if seeded:
-        ui.step(f"indexed {seeded} session(s) not previously seen")
-    if settled:
-        ui.step(f"settled {settled} session(s) as open/closed")
-    if seeded or settled:
-        gitutil.commit_all(config.tasks_repo, "ctui dream: update access index")
+    host = hostname()
+    ui.heading(f"dream: {target.isoformat()} on {host}")
 
     digests = dream.collect(config.tasks_repo, target)
     if not digests:
         ui.step(f"no sessions were active on {target.isoformat()}")
         return 0
 
-    page = wiki.ensure_page(wiki_repo, target)
+    page = wiki.ensure_page(wiki_repo, target, host)
     already = wiki.folded_sessions(page)
     pending = [d for d in digests if d.session_id not in already]
 

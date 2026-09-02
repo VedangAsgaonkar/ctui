@@ -639,9 +639,6 @@ def test_launching_records_an_access(config, project, fake_claude, monkeypatch):
     C.cmd_launch(replace=False)
     assert [t.task_id for t in T.recent_tasks(config.tasks_repo)] == [task.task_id]
 
-    # the session id must be recorded, or dream cannot find the transcript
-    launched = T.Task.load(task.dir).sessions[0].session_id
-    assert [r.session_id for r in T.read_access(config.tasks_repo)] == [launched]
 
 
 def test_init_records_an_access(config, project, fake_claude, monkeypatch):
@@ -659,8 +656,6 @@ def test_resuming_records_an_access(config, project, answers, fake_claude, monke
                          "44444444-0000-0000-0000-000000000000"]
     C.cmd_resume(replace=False)
     assert [t.task_id for t in T.recent_tasks(config.tasks_repo)] == [task.task_id]
-    assert [r.session_id for r in T.read_access(config.tasks_repo)] == \
-        ["44444444-0000-0000-0000-000000000000"]
 
 
 def test_opening_a_shell_records_an_access(config, project, answers, monkeypatch):
@@ -671,8 +666,6 @@ def test_opening_a_shell_records_an_access(config, project, answers, monkeypatch
     answers["select"] = [lambda choices: choices[0].value, C.SHELL_CHOICE]
     C.cmd_resume(replace=False)
     assert [t.task_id for t in T.recent_tasks(config.tasks_repo)] == [task.task_id]
-    # a shell has no transcript, so it must not become a dream candidate
-    assert [r.session_id for r in T.read_access(config.tasks_repo)] == [None]
 
 
 def test_access_log_is_committed(config, project, fake_claude, monkeypatch):

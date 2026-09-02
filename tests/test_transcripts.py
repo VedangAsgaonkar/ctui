@@ -1,7 +1,7 @@
 """Locating and digesting claude session transcripts."""
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 import pytest

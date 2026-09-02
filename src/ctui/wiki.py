@@ -26,15 +26,21 @@ SECTIONS = [
 ]
 
 
-def dated_dir(wiki_repo: Path) -> Path:
-    return wiki_repo / DATED_DIRNAME
+def dated_dir(wiki_repo: Path, host: str) -> Path:
+    """Dated pages are partitioned by host.
+
+    Only the machine running the cron writes its own directory, so two hosts
+    distilling the same night can never conflict on `ctui --sync`. Host sits
+    under `dated/` rather than above it so other wiki sections stay top level.
+    """
+    return wiki_repo / DATED_DIRNAME / host
 
 
-def dated_path(wiki_repo: Path, day: Date) -> Path:
-    return dated_dir(wiki_repo) / f"{day.isoformat()}.md"
+def dated_path(wiki_repo: Path, day: Date, host: str) -> Path:
+    return dated_dir(wiki_repo, host) / f"{day.isoformat()}.md"
 
 
-def page_template(day: Date) -> str:
+def page_template(day: Date, host: str) -> str:
     """A fresh dated page.
 
     The scope note is on the page itself, not only in the prompt: the page is
@@ -42,9 +48,10 @@ def page_template(day: Date) -> str:
     results and measurements are deliberately absent.
     """
     lines = [
-        f"# {day.isoformat()}",
+        f"# {day.isoformat()} — {host}",
         "",
-        "Reusable learnings distilled from the claude sessions of this day.",
+        f"Reusable learnings distilled from the claude sessions run on {host} "
+        "on this day.",
         "",
         "Only what stays useful on a *different* task months from now belongs here:",
         "methods, not results. How an experiment is run, not what it showed. How a",
@@ -57,12 +64,12 @@ def page_template(day: Date) -> str:
     return "\n".join(lines)
 
 
-def ensure_page(wiki_repo: Path, day: Date) -> Path:
-    """The page for `day`, created from the template if it does not exist."""
-    path = dated_path(wiki_repo, day)
+def ensure_page(wiki_repo: Path, day: Date, host: str) -> Path:
+    """The page for `day` on `host`, created from the template if absent."""
+    path = dated_path(wiki_repo, day, host)
     if not path.exists():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(page_template(day))
+        path.write_text(page_template(day, host))
     return path
 
 
@@ -79,7 +86,7 @@ def record_folded(page: Path, session_id: str, task_id: str, task_name: str) -> 
     ctui owns this section rather than the model: it is what makes `--dream`
     idempotent, so it must not depend on the model remembering to write it.
     """
-    text = page.read_text() if page.exists() else page_template(Date.today())
+    text = page.read_text() if page.exists() else ""
     entry = (f"<!-- ctui:session {session_id} -->\n"
              f"- `{session_id[:8]}` · {task_id} ({task_name})\n")
 

@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import date as Date
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -92,29 +92,42 @@ def _day_bounds(day: Date) -> tuple[datetime, datetime]:
     return start, start + timedelta(days=1)
 
 
-def could_contain(path: Path, day: Date) -> bool:
-    """Cheap mtime pre-filter: can this file hold records from `day`?
+def first_record_date(path: Path) -> Date | None:
+    """Local date of the earliest timestamped record, or None if unreadable.
 
-    A transcript is only appended to, so one last modified before the day began
-    cannot contain records from it. One stat, versus parsing the whole file.
+    Reads from the head of the file and stops as soon as it finds one, so it
+    stays cheap on a multi-megabyte transcript.
     """
+    for record in iter_records(path):
+        found = record_local_date(record)
+        if found is not None:
+            return found
+    return None
+
+
+def could_contain(path: Path, day: Date) -> bool:
+    """Can this transcript hold records from `day`?
+
+    Bounds the day from the file itself, cheaply, from both directions:
+
+    * mtime before the day began — a transcript is only appended to, so its
+      last write cannot precede a record it contains. One stat.
+    * first record after the day — the session started later. One line.
+
+    Everything surviving both is parsed in full. This is deliberately all the
+    filtering there is: measurement showed that a session-state index layered
+    on top of the mtime check saved stat calls but no parses at all, which did
+    not justify the bookkeeping.
+    """
+    start, _ = _day_bounds(day)
     try:
         mtime = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
     except OSError:
         return False
-    return mtime >= _day_bounds(day)[0]
-
-
-def record_span(path: Path) -> tuple[Date, Date] | None:
-    """First and last local dates present in a transcript.
-
-    Used to seed the access index for sessions that predate it, so the
-    exhaustive scan is paid once rather than every night.
-    """
-    dates = [d for d in (record_local_date(r) for r in iter_records(path)) if d]
-    if not dates:
-        return None
-    return min(dates), max(dates)
+    if mtime < start:
+        return False
+    first = first_record_date(path)
+    return first is None or first <= day
 
 
 def _blocks(message) -> list[dict]:
