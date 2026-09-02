@@ -41,7 +41,12 @@ STATE_CLOSED = "closed"
 # transcript has not been written for this long is treated as closed, with its
 # last write as the close time — which is what a session's end *means* for the
 # purpose of deciding which days it touched.
-IDLE_CLOSE = timedelta(minutes=30)
+#
+# Generous on purpose: a session left open across a weekend is still a session
+# someone intends to come back to, and closing it early only costs precision at
+# the upper bound of its coverage (never a lost day, since coverage for an open
+# row runs to today).
+IDLE_CLOSE = timedelta(days=3)
 
 # Fallback span for a session still considered open: it may be running right
 # now, so it could have touched any day up to today.

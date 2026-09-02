@@ -258,7 +258,7 @@ write seen on its transcript. This is what bounds day coverage:
 ctui `exec`s claude and so never observes a session ending, but it does not need to:
 the transcript's last write *is* when activity stopped, which is all day coverage
 depends on. `--dream` calls `reconcile_access`, which stats each open row's transcript
-and closes any that has been idle for 30 minutes, recording that write as
+and closes any that has been idle for three days, recording that write as
 `activity_at`. Stat only, never a parse. It is self-correcting — a closed session
 written to again is reopened — and `--launch`/`--resume` reopen a row directly.
 

@@ -347,14 +347,22 @@ def test_rows_without_a_state_read_as_open(tasks_repo, project):
 
 # ---- reconciliation (stat only, never a parse) ---------------------
 
-def _transcript(root, session_id, *, age_minutes):
-    """A transcript file whose mtime is `age_minutes` in the past."""
+IDLE = T.IDLE_CLOSE + timedelta(hours=1)      # comfortably past the threshold
+LIVE = timedelta(minutes=1)                   # comfortably inside it
+
+
+def _transcript(root, session_id, *, age: timedelta):
+    """A transcript file whose mtime is `age` in the past.
+
+    Ages are expressed relative to T.IDLE_CLOSE so that tuning the threshold
+    cannot silently invert what these tests assert.
+    """
     import os
     from ctui import transcripts as X
     path = X.transcript_path(root, session_id)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text('{"type":"user"}\n')
-    when = (datetime.now() - timedelta(minutes=age_minutes)).timestamp()
+    when = (datetime.now() - age).timestamp()
     os.utime(path, (when, when))
     return path
 
@@ -362,7 +370,7 @@ def _transcript(root, session_id, *, age_minutes):
 def test_idle_session_is_closed_at_its_last_write(tasks_repo, project):
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
-    path = _transcript(project, "s1", age_minutes=120)
+    path = _transcript(project, "s1", age=IDLE)
 
     assert T.reconcile_access(tasks_repo) == 1
     row = T.read_access(tasks_repo)[0]
@@ -375,7 +383,7 @@ def test_idle_session_is_closed_at_its_last_write(tasks_repo, project):
 def test_a_live_session_stays_open(tasks_repo, project):
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
-    _transcript(project, "s1", age_minutes=1)
+    _transcript(project, "s1", age=LIVE)
 
     assert T.reconcile_access(tasks_repo) == 0
     assert not T.read_access(tasks_repo)[0].closed
@@ -384,7 +392,7 @@ def test_a_live_session_stays_open(tasks_repo, project):
 def test_reconcile_is_idempotent(tasks_repo, project):
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
-    _transcript(project, "s1", age_minutes=120)
+    _transcript(project, "s1", age=IDLE)
 
     assert T.reconcile_access(tasks_repo) == 1
     assert T.reconcile_access(tasks_repo) == 0
@@ -394,11 +402,11 @@ def test_a_resumed_session_is_reopened(tasks_repo, project):
     """Self-correcting: writing to a closed session's transcript reopens it."""
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
-    _transcript(project, "s1", age_minutes=120)
+    _transcript(project, "s1", age=IDLE)
     T.reconcile_access(tasks_repo)
     assert T.read_access(tasks_repo)[0].closed
 
-    _transcript(project, "s1", age_minutes=0)    # activity again
+    _transcript(project, "s1", age=timedelta(0))    # activity again
     assert T.reconcile_access(tasks_repo) == 1
     assert not T.read_access(tasks_repo)[0].closed
 
@@ -407,7 +415,7 @@ def test_reconcile_never_parses_a_transcript(tasks_repo, project, monkeypatch):
     from ctui import transcripts as X
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
-    _transcript(project, "s1", age_minutes=120)
+    _transcript(project, "s1", age=IDLE)
 
     def _boom(path):
         raise AssertionError("reconcile must not read transcript contents")
@@ -435,7 +443,7 @@ def test_reconcile_survives_a_deleted_task(tasks_repo, project):
     import shutil
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
-    _transcript(project, "s1", age_minutes=120)
+    _transcript(project, "s1", age=IDLE)
     shutil.rmtree(task.dir)
     assert T.reconcile_access(tasks_repo) == 0
 
@@ -444,18 +452,19 @@ def test_reconcile_on_an_empty_index(tasks_repo):
     assert T.reconcile_access(tasks_repo) == 0
 
 
-def test_reconciled_closure_removes_the_next_day_candidate(tasks_repo, project):
-    """The end-to-end point: yesterday's finished session is not scanned today."""
+def test_reconciled_closure_removes_later_day_candidates(tasks_repo, project):
+    """The end-to-end point: a finished session is not scanned for later days."""
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
+
+    opened = datetime.now().astimezone() - IDLE
     rows = T.read_access(tasks_repo)
-    yesterday = datetime.now().astimezone() - timedelta(days=1)
-    rows[0].first_at = rows[0].last_at = yesterday.isoformat(timespec="seconds")
+    rows[0].first_at = rows[0].last_at = opened.isoformat(timespec="seconds")
     T.save_access(tasks_repo, rows)
-    _transcript(project, "s1", age_minutes=60 * 24)     # last wrote a day ago
+    _transcript(project, "s1", age=IDLE)
 
     today = datetime.now().astimezone().date()
     assert T.sessions_touching(tasks_repo, today)        # open: still a candidate
     T.reconcile_access(tasks_repo)
     assert T.sessions_touching(tasks_repo, today) == []  # closed: no longer
-    assert T.sessions_touching(tasks_repo, yesterday.date())
+    assert T.sessions_touching(tasks_repo, opened.date())

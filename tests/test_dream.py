@@ -475,19 +475,27 @@ def test_collect_survives_a_deleted_task_in_the_index(tasks_repo, tmp_path):
 
 def test_dream_reconciles_before_collecting(tasks_repo, wiki_repo, tmp_path,
                                             scribe, capsys):
-    """A session that finished before the target day is not even opened."""
+    """A session idle long enough to be closed is not opened for a later day.
+
+    Dated relative to now rather than to a fixed calendar day, since whether a
+    transcript counts as idle depends on how long ago it was actually written.
+    """
     import os
-    task = _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"], day=BEFORE)
+    now = datetime.now().astimezone()
+    ran = (now - (T.IDLE_CLOSE + timedelta(days=2))).date()
+    target = (now - timedelta(days=1)).date()
+
+    task = _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"], day=ran)
     T.record_access(tasks_repo, task, "s1-0000")
+    when = datetime.combine(ran, datetime.min.time()).astimezone().replace(hour=10)
     rows = T.read_access(tasks_repo)
-    when = datetime.combine(BEFORE, datetime.min.time()).astimezone().replace(hour=10)
     rows[0].first_at = rows[0].last_at = when.isoformat(timespec="seconds")
     T.save_access(tasks_repo, rows)
     path = X.transcript_path(task.root, "s1-0000")
     os.utime(path, (when.timestamp(), when.timestamp()))
     CFG.Config(tasks_repo=tasks_repo, wiki_repo=wiki_repo).save()
 
-    assert C.cmd_dream(day=DAY.isoformat()) == 0
+    assert C.cmd_dream(day=target.isoformat()) == 0
     out = capsys.readouterr().out
     assert "settled 1 session" in out
     assert "no sessions were active" in out
