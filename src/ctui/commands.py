@@ -35,6 +35,7 @@ from .tasks import (
     find_tasks_from_cwd,
     hostname,
     load_tasks,
+    reconcile_access,
     record_access,
     recent_tasks,
     tasks_for_root,
@@ -537,9 +538,15 @@ def cmd_dream(day: str | None = None, extra: list[str] | None = None,
     ui.heading(f"dream: {target.isoformat()}")
 
     seeded = dream.ensure_access_index(config.tasks_repo)
+    # Close out sessions whose transcripts have gone idle, so a session that
+    # finished yesterday stops being a candidate for today. Stat only.
+    settled = reconcile_access(config.tasks_repo)
     if seeded:
         ui.step(f"indexed {seeded} session(s) not previously seen")
-        gitutil.commit_all(config.tasks_repo, "ctui dream: backfill access index")
+    if settled:
+        ui.step(f"settled {settled} session(s) as open/closed")
+    if seeded or settled:
+        gitutil.commit_all(config.tasks_repo, "ctui dream: update access index")
 
     digests = dream.collect(config.tasks_repo, target)
     if not digests:

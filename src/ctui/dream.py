@@ -11,6 +11,7 @@ from pathlib import Path
 from . import wiki
 from .launcher import claude_bin
 from .tasks import (
+    STATE_CLOSED,
     Access,
     Task,
     TaskError,
@@ -18,6 +19,7 @@ from .tasks import (
     hostname,
     load_tasks,
     read_access,
+    reconcile_access,
     save_access,
     sessions_touching,
 )
@@ -71,13 +73,18 @@ def ensure_access_index(tasks_repo: Path, host: str | None = None) -> int:
             if span is None:
                 continue
             first, last = span
+            last_stamp = datetime.combine(last, datetime.min.time()).astimezone().isoformat()
             rows.append(Access(
                 host=task.host,
                 task_id=task.task_id,
                 session_id=session.session_id,
                 first_at=datetime.combine(first, datetime.min.time()).astimezone().isoformat(),
-                last_at=datetime.combine(last, datetime.min.time()).astimezone().isoformat(),
+                last_at=last_stamp,
                 count=1,
+                # The transcript's own span is known and final, so record the row
+                # as closed rather than leaving it open-ended.
+                state=STATE_CLOSED,
+                activity_at=last_stamp,
             ))
             known.add(key)
             added += 1

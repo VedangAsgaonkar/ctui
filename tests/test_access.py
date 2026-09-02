@@ -21,13 +21,24 @@ def _projects(tmp_path, n):
     return out
 
 
-def _backdate(tasks_repo, task_id, session_id, first, last, host="testhost"):
-    """Rewrite one row's timestamps, to test day coverage without waiting."""
+def _backdate(tasks_repo, task_id, session_id, first, last, host="testhost",
+              closed=True):
+    """Rewrite one row's span, to test day coverage without waiting.
+
+    Defaults to closed, which is what a session from a past day actually is
+    once reconciled — an open row is treated as running up to today.
+    """
     entries = T.read_access(tasks_repo, host)
     for entry in entries:
         if entry.task_id == task_id and entry.session_id == session_id:
             entry.first_at = datetime.combine(first, datetime.min.time()).astimezone().isoformat()
             entry.last_at = datetime.combine(last, datetime.min.time()).astimezone().isoformat()
+            if closed:
+                entry.state = T.STATE_CLOSED
+                entry.activity_at = entry.last_at
+            else:
+                entry.state = T.STATE_OPEN
+                entry.activity_at = None
     T.save_access(tasks_repo, entries, host)
 
 
@@ -150,26 +161,57 @@ def test_sessions_touching_the_access_day(tasks_repo, project):
     assert T.sessions_touching(tasks_repo, date(2026, 9, 5)) == []
 
 
-def test_a_session_opened_the_night_before_still_counts(tasks_repo, project):
-    """Only the opening is recorded, so a run past midnight must not be lost."""
+def test_a_closed_session_stops_being_a_candidate(tasks_repo, project):
+    """The point of tracking state: no wasted parse the day after it ended."""
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
     _backdate(tasks_repo, task.task_id, "s1", date(2026, 9, 1), date(2026, 9, 1))
 
-    assert [e.session_id for e in T.sessions_touching(tasks_repo, date(2026, 9, 2))] == ["s1"]
+    assert [e.session_id for e in T.sessions_touching(tasks_repo, date(2026, 9, 1))] == ["s1"]
+    assert T.sessions_touching(tasks_repo, date(2026, 9, 2)) == []
+
+
+def test_an_open_session_stays_a_candidate_through_today(tasks_repo, project):
+    """It may be running right now, so it could have touched any day since."""
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    _backdate(tasks_repo, task.task_id, "s1", date(2026, 9, 1), date(2026, 9, 1),
+              closed=False)
+
+    today = datetime.now().astimezone().date()
+    assert T.sessions_touching(tasks_repo, date(2026, 9, 1))
+    assert T.sessions_touching(tasks_repo, today)
+    assert T.sessions_touching(tasks_repo, today + timedelta(days=1)) == []
+
+
+def test_closed_span_uses_the_last_transcript_write(tasks_repo, project):
+    """activity_at, not the access time, bounds a closed session."""
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    rows = T.read_access(tasks_repo)
+    opened = datetime.combine(date(2026, 9, 1), datetime.min.time()).astimezone()
+    rows[0].first_at = rows[0].last_at = opened.replace(hour=23).isoformat()
+    rows[0].state = T.STATE_CLOSED
+    rows[0].activity_at = (opened + timedelta(days=1)).replace(hour=1).isoformat()
+    T.save_access(tasks_repo, rows)
+
+    # Opened on the 1st, last wrote at 01:00 on the 2nd: covers both.
+    assert T.sessions_touching(tasks_repo, date(2026, 9, 1))
+    assert T.sessions_touching(tasks_repo, date(2026, 9, 2))
     assert T.sessions_touching(tasks_repo, date(2026, 9, 3)) == []
 
 
-def test_a_long_lived_session_covers_the_whole_span(tasks_repo, project):
+def test_a_long_lived_session_covers_exactly_its_span(tasks_repo, project):
+    """A closed span is exact at both ends — no grace day to over-scan."""
     task = T.create_task(tasks_repo, project, "t")
     T.record_access(tasks_repo, task, "s1")
     _backdate(tasks_repo, task.task_id, "s1", date(2026, 9, 1), date(2026, 9, 5))
 
-    for day in range(1, 7):
-        covered = T.sessions_touching(tasks_repo, date(2026, 9, day))
-        assert bool(covered), f"2026-09-{day:02d} should be covered"
+    for day in range(1, 6):
+        assert T.sessions_touching(tasks_repo, date(2026, 9, day)), \
+            f"2026-09-{day:02d} should be covered"
     assert T.sessions_touching(tasks_repo, date(2026, 8, 31)) == []
-    assert T.sessions_touching(tasks_repo, date(2026, 9, 7)) == []
+    assert T.sessions_touching(tasks_repo, date(2026, 9, 6)) == []
 
 
 def test_shell_accesses_are_not_dream_candidates(tasks_repo, project):
@@ -257,3 +299,163 @@ def test_index_is_not_mistaken_for_a_task(tasks_repo, project):
     assert len(T.load_tasks(tasks_repo)) == 1
     assert all(d.name.startswith("TASK_") for d in T.iter_task_dirs(tasks_repo))
     assert set(T.read_index(tasks_repo).entries) == {task.task_id}
+
+
+# ---- open / closed state -------------------------------------------
+
+def test_new_rows_start_open(tasks_repo, project):
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    row = T.read_access(tasks_repo)[0]
+    assert row.state == T.STATE_OPEN
+    assert not row.closed
+    assert row.activity_at is None
+
+
+def test_re_accessing_reopens_a_closed_row(tasks_repo, project):
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    _backdate(tasks_repo, task.task_id, "s1", date(2026, 9, 1), date(2026, 9, 1))
+    assert T.read_access(tasks_repo)[0].closed
+
+    T.record_access(tasks_repo, task, "s1")
+    row = T.read_access(tasks_repo)[0]
+    assert row.state == T.STATE_OPEN
+    assert row.activity_at is None
+
+
+def test_unknown_state_reads_as_open(tasks_repo, project):
+    """An unrecognised value must not silently exclude a session."""
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    raw = json.loads(T.access_path(tasks_repo).read_text())
+    raw["entries"][0]["state"] = "banana"
+    T.access_path(tasks_repo).write_text(json.dumps(raw))
+    assert T.read_access(tasks_repo)[0].state == T.STATE_OPEN
+
+
+def test_rows_without_a_state_read_as_open(tasks_repo, project):
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    raw = json.loads(T.access_path(tasks_repo).read_text())
+    del raw["entries"][0]["state"]
+    del raw["entries"][0]["activity_at"]
+    T.access_path(tasks_repo).write_text(json.dumps(raw))
+    row = T.read_access(tasks_repo)[0]
+    assert row.state == T.STATE_OPEN and row.activity_at is None
+
+
+# ---- reconciliation (stat only, never a parse) ---------------------
+
+def _transcript(root, session_id, *, age_minutes):
+    """A transcript file whose mtime is `age_minutes` in the past."""
+    import os
+    from ctui import transcripts as X
+    path = X.transcript_path(root, session_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text('{"type":"user"}\n')
+    when = (datetime.now() - timedelta(minutes=age_minutes)).timestamp()
+    os.utime(path, (when, when))
+    return path
+
+
+def test_idle_session_is_closed_at_its_last_write(tasks_repo, project):
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    path = _transcript(project, "s1", age_minutes=120)
+
+    assert T.reconcile_access(tasks_repo) == 1
+    row = T.read_access(tasks_repo)[0]
+    assert row.closed
+    assert row.activity_at                       # taken from the transcript mtime
+    mtime = datetime.fromtimestamp(path.stat().st_mtime).astimezone()
+    assert datetime.fromisoformat(row.activity_at) == mtime.replace(microsecond=0)
+
+
+def test_a_live_session_stays_open(tasks_repo, project):
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    _transcript(project, "s1", age_minutes=1)
+
+    assert T.reconcile_access(tasks_repo) == 0
+    assert not T.read_access(tasks_repo)[0].closed
+
+
+def test_reconcile_is_idempotent(tasks_repo, project):
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    _transcript(project, "s1", age_minutes=120)
+
+    assert T.reconcile_access(tasks_repo) == 1
+    assert T.reconcile_access(tasks_repo) == 0
+
+
+def test_a_resumed_session_is_reopened(tasks_repo, project):
+    """Self-correcting: writing to a closed session's transcript reopens it."""
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    _transcript(project, "s1", age_minutes=120)
+    T.reconcile_access(tasks_repo)
+    assert T.read_access(tasks_repo)[0].closed
+
+    _transcript(project, "s1", age_minutes=0)    # activity again
+    assert T.reconcile_access(tasks_repo) == 1
+    assert not T.read_access(tasks_repo)[0].closed
+
+
+def test_reconcile_never_parses_a_transcript(tasks_repo, project, monkeypatch):
+    from ctui import transcripts as X
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    _transcript(project, "s1", age_minutes=120)
+
+    def _boom(path):
+        raise AssertionError("reconcile must not read transcript contents")
+
+    monkeypatch.setattr(X, "iter_records", _boom)
+    assert T.reconcile_access(tasks_repo) == 1
+
+
+def test_reconcile_ignores_shell_rows(tasks_repo, project):
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, None)
+    assert T.reconcile_access(tasks_repo) == 0
+    assert not T.read_access(tasks_repo)[0].closed
+
+
+def test_reconcile_leaves_rows_without_transcripts_alone(tasks_repo, project):
+    """Nothing to judge by, so no claim is made either way."""
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "ghost")
+    assert T.reconcile_access(tasks_repo) == 0
+    assert not T.read_access(tasks_repo)[0].closed
+
+
+def test_reconcile_survives_a_deleted_task(tasks_repo, project):
+    import shutil
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    _transcript(project, "s1", age_minutes=120)
+    shutil.rmtree(task.dir)
+    assert T.reconcile_access(tasks_repo) == 0
+
+
+def test_reconcile_on_an_empty_index(tasks_repo):
+    assert T.reconcile_access(tasks_repo) == 0
+
+
+def test_reconciled_closure_removes_the_next_day_candidate(tasks_repo, project):
+    """The end-to-end point: yesterday's finished session is not scanned today."""
+    task = T.create_task(tasks_repo, project, "t")
+    T.record_access(tasks_repo, task, "s1")
+    rows = T.read_access(tasks_repo)
+    yesterday = datetime.now().astimezone() - timedelta(days=1)
+    rows[0].first_at = rows[0].last_at = yesterday.isoformat(timespec="seconds")
+    T.save_access(tasks_repo, rows)
+    _transcript(project, "s1", age_minutes=60 * 24)     # last wrote a day ago
+
+    today = datetime.now().astimezone().date()
+    assert T.sessions_touching(tasks_repo, today)        # open: still a candidate
+    T.reconcile_access(tasks_repo)
+    assert T.sessions_touching(tasks_repo, today) == []  # closed: no longer
+    assert T.sessions_touching(tasks_repo, yesterday.date())

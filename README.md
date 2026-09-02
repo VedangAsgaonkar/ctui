@@ -227,7 +227,8 @@ most recently accessed first, with the first and last access times and a count.
   "entries": [
     {"host": "furiosa.stanford.edu", "task_id": "TASK_20260902_004505",
      "session_id": "95a18469-…", "first_at": "2026-09-02T00:45:05-07:00",
-     "last_at": "2026-09-02T09:12:44-07:00", "count": 3}
+     "last_at": "2026-09-02T09:12:44-07:00", "count": 3,
+     "state": "closed", "activity_at": "2026-09-02T09:41:02-07:00"}
   ]
 }
 ```
@@ -246,12 +247,29 @@ Two callers, one structure:
   total sessions rather than with the day: at 302 sessions, 302 parses / ~830 ms
   versus 2 parses / ~10 ms.
 
-Day coverage is deliberately generous at the upper end. Only a session's *opening* is
-recorded, never when it stopped, so a row counts for one day past its last access —
-otherwise a session started at 23:50 and worked past midnight would be lost. False
-positives cost one transcript parse; a false negative loses a day's learnings. The
-transcript remains the authority on which records belong to which day; the index only
-decides which transcripts are worth opening.
+Each row also carries a `state` of `open` or `closed`, and `activity_at` — the last
+write seen on its transcript. This is what bounds day coverage:
+
+- **closed** — covers first access through `activity_at`, exactly. A session that
+  finished yesterday is not a candidate today.
+- **open** — covers first access through today, since it may be running right now. A
+  false positive costs one transcript check; a false negative loses a day's learnings.
+
+ctui `exec`s claude and so never observes a session ending, but it does not need to:
+the transcript's last write *is* when activity stopped, which is all day coverage
+depends on. `--dream` calls `reconcile_access`, which stats each open row's transcript
+and closes any that has been idle for 30 minutes, recording that write as
+`activity_at`. Stat only, never a parse. It is self-correcting — a closed session
+written to again is reopened — and `--launch`/`--resume` reopen a row directly.
+
+At 2003 sessions of which 3 ran today, this takes the candidate set from 2003 rows to
+3, and the filesystem checks with it (263 ms → 36 ms). It does not reduce transcript
+*parsing*, which the mtime pre-filter in step 1 was already preventing; what it buys
+is not touching the filesystem for rows that cannot qualify, and an exact upper bound
+in place of a heuristic grace day.
+
+The transcript remains the authority on which records belong to which day; the index
+only decides which transcripts are worth opening.
 
 Sessions the index has never seen — predating it, or arrived by `git pull` — are
 seeded on the next `--dream` from their transcript's own timestamp span, so the

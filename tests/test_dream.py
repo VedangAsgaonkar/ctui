@@ -360,6 +360,7 @@ def test_collect_ignores_sessions_indexed_for_other_days(tasks_repo, tmp_path,
     entries = T.read_access(tasks_repo)
     long_ago = datetime.combine(date(2026, 1, 1), datetime.min.time()).astimezone()
     entries[0].first_at = entries[0].last_at = long_ago.isoformat()
+    entries[0].state, entries[0].activity_at = T.STATE_CLOSED, long_ago.isoformat()
     T.save_access(tasks_repo, entries)
 
     counted_parses["n"] = 0
@@ -451,6 +452,8 @@ def test_a_session_opened_before_midnight_lands_on_the_right_day(tasks_repo, tmp
     entries = T.read_access(tasks_repo)
     opened = datetime.combine(BEFORE, datetime.min.time()).astimezone().replace(hour=23)
     entries[0].first_at = entries[0].last_at = opened.isoformat()
+    entries[0].state = T.STATE_CLOSED
+    entries[0].activity_at = (opened + timedelta(hours=3)).isoformat()   # 02:00 on DAY
     T.save_access(tasks_repo, entries)
 
     assert T.sessions_touching(tasks_repo, BEFORE)          # candidate for both days
@@ -468,3 +471,44 @@ def test_collect_survives_a_deleted_task_in_the_index(tasks_repo, tmp_path):
     shutil.rmtree(task.dir)
 
     assert [d.session_id for d in dream.collect(tasks_repo, DAY)] == ["s2-0000"]
+
+
+def test_dream_reconciles_before_collecting(tasks_repo, wiki_repo, tmp_path,
+                                            scribe, capsys):
+    """A session that finished before the target day is not even opened."""
+    import os
+    task = _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"], day=BEFORE)
+    T.record_access(tasks_repo, task, "s1-0000")
+    rows = T.read_access(tasks_repo)
+    when = datetime.combine(BEFORE, datetime.min.time()).astimezone().replace(hour=10)
+    rows[0].first_at = rows[0].last_at = when.isoformat(timespec="seconds")
+    T.save_access(tasks_repo, rows)
+    path = X.transcript_path(task.root, "s1-0000")
+    os.utime(path, (when.timestamp(), when.timestamp()))
+    CFG.Config(tasks_repo=tasks_repo, wiki_repo=wiki_repo).save()
+
+    assert C.cmd_dream(day=DAY.isoformat()) == 0
+    out = capsys.readouterr().out
+    assert "settled 1 session" in out
+    assert "no sessions were active" in out
+    assert _calls(scribe) == []
+    assert T.read_access(tasks_repo)[0].closed
+
+
+def test_backfilled_rows_are_recorded_closed(tasks_repo, tmp_path):
+    """Their span comes from the transcript and is already final."""
+    _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"])
+    dream.ensure_access_index(tasks_repo)
+    row = T.read_access(tasks_repo)[0]
+    assert row.closed
+    assert row.activity_at
+    assert row.covers(DAY)
+
+
+def test_dream_commits_index_updates(tasks_repo, wiki_repo, tmp_path, scribe):
+    _task_with_sessions(tasks_repo, tmp_path, "t", ["s1-0000"])
+    CFG.Config(tasks_repo=tasks_repo, wiki_repo=wiki_repo).save()
+
+    C.cmd_dream(day=DAY.isoformat())
+    assert not G.is_dirty(tasks_repo)
+    assert "access index" in G.run(tasks_repo, "log", "-1", "--pretty=%s").out
