@@ -110,3 +110,31 @@ def test_parse_time_rejects_junk(value):
 def test_strip_block_is_a_noop_without_markers():
     text = "MAILTO=me\n0 1 * * * /do/something"
     assert cron.strip_block(text) == text
+
+
+def test_line_sets_home_explicitly(fake_cron, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "real-home"))
+    line = cron.install("/abs/ctui", "/abs/claude")
+    assert f"HOME={tmp_path / 'real-home'}" in line
+    assert line.index("HOME=") < line.index("/abs/ctui")
+
+
+def test_home_is_captured_at_install_not_run_time(fake_cron, monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path / "install-home"))
+    cron.install("/abs/ctui", None)
+    monkeypatch.setenv("HOME", "/somewhere/else/entirely")
+    assert f"HOME={tmp_path / 'install-home'}" in fake_cron.read_text()
+
+
+def test_home_is_inline_not_a_crontab_assignment(fake_cron):
+    fake_cron.write_text("0 1 * * * /someone/elses/job\n")
+    cron.install("/abs/ctui", None)
+    for line in fake_cron.read_text().splitlines():
+        if line.strip().startswith("HOME="):
+            raise AssertionError("a crontab-level HOME would leak into other jobs")
+
+
+def test_home_survives_without_a_claude_path(fake_cron):
+    line = cron.install("/abs/ctui", None)
+    assert "HOME=" in line
+    assert "CTUI_CLAUDE_BIN" not in line

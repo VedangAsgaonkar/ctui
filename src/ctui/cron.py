@@ -67,24 +67,23 @@ def log_path() -> Path:
     return Path(base) / "dream.log"
 
 
-def dream_line(ctui_bin: str, claude_bin: str | None, hour: int, minute: int) -> str:
-    """The crontab entry.
-
-    cron runs with a near-empty environment, so the binaries are absolute and
-    the claude path is passed explicitly rather than relying on PATH.
-    """
-    env = f"CTUI_CLAUDE_BIN={claude_bin} " if claude_bin else ""
-    return (f"{minute} {hour} * * * {env}{ctui_bin} --dream "
+def dream_line(ctui_bin: str, claude_bin: str | None, hour: int, minute: int,
+               home: str | None = None) -> str:
+    env = [f"HOME={home or Path.home()}"]
+    if claude_bin:
+        env.append(f"CTUI_CLAUDE_BIN={claude_bin}")
+    return (f"{minute} {hour} * * * {' '.join(env)} {ctui_bin} --dream "
             f">> {log_path()} 2>&1")
 
 
 def dream_block(ctui_bin: str, claude_bin: str | None = None,
-                hour: int = DEFAULT_HOUR, minute: int = DEFAULT_MINUTE) -> str:
+                hour: int = DEFAULT_HOUR, minute: int = DEFAULT_MINUTE,
+                home: str | None = None) -> str:
     return "\n".join([
         MARKER_BEGIN,
         "# Managed by ctui: `ctui --install-dream` rewrites this block,",
         "# `ctui --uninstall-dream` removes it. Hand edits will be lost.",
-        dream_line(ctui_bin, claude_bin, hour, minute),
+        dream_line(ctui_bin, claude_bin, hour, minute, home),
         MARKER_END,
     ])
 
@@ -124,14 +123,15 @@ def current_line() -> str | None:
 
 
 def install(ctui_bin: str, claude_bin: str | None = None,
-            hour: int = DEFAULT_HOUR, minute: int = DEFAULT_MINUTE) -> str:
-    """Install or replace the dream block. Returns the schedule line."""
+            hour: int = DEFAULT_HOUR, minute: int = DEFAULT_MINUTE,
+            home: str | None = None) -> str:
+    home = home or str(Path.home())
     existing = strip_block(read_crontab())
-    block = dream_block(ctui_bin, claude_bin, hour, minute)
+    block = dream_block(ctui_bin, claude_bin, hour, minute, home)
     combined = f"{existing}\n\n{block}" if existing else block
     write_crontab(combined)
     log_path().parent.mkdir(parents=True, exist_ok=True)
-    return dream_line(ctui_bin, claude_bin, hour, minute)
+    return dream_line(ctui_bin, claude_bin, hour, minute, home)
 
 
 def uninstall() -> bool:
