@@ -8,6 +8,7 @@ from pathlib import Path
 
 DATED_DIRNAME = "dated"
 FOLDED_HEADING = "## Sessions folded in"
+TAGS_PREFIX = "Tags:"
 
 # One marker per session already distilled into a page. An HTML comment rather
 # than prose so `--dream` can re-run safely however the model reformats the
@@ -41,14 +42,13 @@ def dated_path(wiki_repo: Path, day: Date, host: str) -> Path:
 
 
 def page_template(day: Date, host: str) -> str:
-    """A fresh dated page.
-
-    The scope note is on the page itself, not only in the prompt: the page is
-    read by people and by later dream passes, and both need to know that
-    results and measurements are deliberately absent.
-    """
     lines = [
         f"# {day.isoformat()} — {host}",
+        "",
+        f"{TAGS_PREFIX}",
+        "",
+        "<!-- Optional, comma-separated topics this day's learnings are about, "
+        "e.g. python, git, slurm. Extend the list; leave it empty if nothing fits. -->",
         "",
         f"Reusable learnings distilled from the claude sessions run on {host} "
         "on this day.",
@@ -57,11 +57,24 @@ def page_template(day: Date, host: str) -> str:
         "methods, not results. How an experiment is run, not what it showed. How a",
         "metric is computed, not what it measured.",
         "",
+        "No section is compulsory. Most days fill one or two; an empty section",
+        "means there was nothing worth recording, which is a fine outcome.",
+        "",
     ]
     for title, blurb in SECTIONS:
         lines += [f"## {title}", "", f"<!-- {blurb} -->", ""]
     lines += [FOLDED_HEADING, "", "<!-- appended by ctui, one line per session -->", ""]
     return "\n".join(lines)
+
+
+def page_tags(page: Path) -> list[str]:
+    if not page.exists():
+        return []
+    for line in page.read_text().splitlines():
+        if line.startswith(TAGS_PREFIX):
+            raw = line[len(TAGS_PREFIX):]
+            return [tag.strip() for tag in raw.split(",") if tag.strip()]
+    return []
 
 
 def ensure_page(wiki_repo: Path, day: Date, host: str) -> Path:

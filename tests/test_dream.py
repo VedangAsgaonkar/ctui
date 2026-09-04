@@ -355,3 +355,27 @@ def test_collect_survives_a_deleted_task_in_the_index(tasks_repo, tmp_path):
 
 
 
+
+
+def test_prompt_says_sections_are_optional(dreamworld, tasks_repo, wiki_repo):
+    item = dream.collect(tasks_repo, DAY)[0]
+    page = wiki.ensure_page(wiki_repo, DAY, HOST)
+    prompt = dream.dream_prompt(Path("/tmp/d.md"), page, item, 1, 1)
+
+    assert "No section is compulsory" in prompt
+    assert "do not invent a learning to fill" in prompt
+    for placeholder in ('"none"', '"N/A"'):
+        assert placeholder in prompt
+    assert "changing nothing at all is a correct" in prompt
+
+
+def test_prompt_explains_the_tags_line(dreamworld, tasks_repo, wiki_repo):
+    item = dream.collect(tasks_repo, DAY)[0]
+    page = wiki.ensure_page(wiki_repo, DAY, HOST)
+    prompt = dream.dream_prompt(Path("/tmp/d.md"), page, item, 1, 1)
+
+    assert wiki.TAGS_PREFIX in prompt
+    assert "lowercase, hyphenated, comma-separated" in prompt
+    assert "Extend the line in place, never" in prompt
+    assert "never repeat a tag already there" in prompt
+    assert "it is optional" in prompt

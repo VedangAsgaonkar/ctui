@@ -62,6 +62,7 @@ def collect(tasks_repo: Path, day: Date) -> list[SessionDigest]:
 def dream_prompt(digest_path: Path, page: Path, item: SessionDigest,
                  index: int, total: int) -> str:
     sections = "\n".join(f"- **{title}** — {blurb}" for title, blurb in wiki.SECTIONS)
+    tags_prefix = wiki.TAGS_PREFIX
     return f"""\
 You are the "dream" pass for ctui: a nightly job that distils reusable knowledge
 out of a day's claude-code sessions into a dated wiki page.
@@ -94,11 +95,23 @@ Rules, in order of precedence:
 4. No duplicates. Read the page first. If a point is already there, skip it, or
    sharpen the existing line in place. Never add a near-duplicate.
 5. Append only. Never delete or reword another session's content. Never add,
-   rename or remove a "## " heading — leave a section untouched if you have
-   nothing for it. Never touch "## Sessions folded in"; ctui maintains that.
-6. Terse and concrete. One learning per bullet. Include the actual command, API
+   rename or remove a "## " heading. Never touch "## Sessions folded in"; ctui
+   maintains that.
+6. No section is compulsory. Most sessions have something for one or two of
+   them. Leave the rest exactly as they are — do not invent a learning to fill
+   a section, do not pad a thin one, and do not write "none", "N/A" or any
+   other placeholder. An empty section is the correct output when the session
+   taught nothing that belongs there, and changing nothing at all is a correct
+   outcome for a whole session.
+7. Terse and concrete. One learning per bullet. Include the actual command, API
    call, flag or path pattern when it is what makes the bullet useful. No
    preamble and no narrative of what happened in the session.
+8. Tags. The header has an optional "{tags_prefix}" line naming the topics the day's
+   learnings are about. If this session adds a topic that is not listed, append
+   it: lowercase, hyphenated, comma-separated, one or two words each
+   (`python`, `slurm`, `prompt-engineering`). Extend the line in place, never
+   replace it, and never repeat a tag already there. A handful for the whole
+   day is plenty. Leave it untouched if nothing new fits — it is optional.
 
 Where things go:
 {sections}
