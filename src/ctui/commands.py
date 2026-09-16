@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import os
 import shutil
 import subprocess
@@ -11,7 +12,7 @@ from pathlib import Path
 
 from questionary import Choice
 
-from . import cron, dream, gitutil, ui, wiki
+from . import cron, dream, gitutil, ui, view, wiki
 from .config import (
     DEFAULT_TASKS_DIRNAME,
     DEFAULT_WIKI_DIRNAME,
@@ -499,6 +500,42 @@ def cmd_list() -> int:
         ui.info(f"    host={t.host}  sessions={len(t.sessions)}  root={t.root}{flag}")
     if any(t.host != this_host for t in tasks):
         ui.info("\n* = task from another host")
+    return 0
+
+
+# =====================================================================
+# view (the artifact browser)
+# =====================================================================
+
+def cmd_view(port: int = view.DEFAULT_PORT, serve: bool = True) -> int:
+    config = load()
+    try:
+        server = view.make_server(config, port)
+    except OSError as exc:
+        raise CommandError(
+            f"could not listen on {view.BIND_HOST}:{port} — {exc}\n"
+            "Pick another port, or stop whatever is already using this one."
+        ) from exc
+
+    bound = server.server_address[1]
+    url = f"http://{view.BIND_HOST}:{bound}/"
+    ui.heading(f"ctui view — {url}")
+    ui.step(f"tasks: {config.tasks_repo}")
+    ui.step(f"tunnel: ssh -N -L {bound}:{view.BIND_HOST}:{bound} "
+            f"{getpass.getuser()}@{hostname()}")
+    ui.info("\nCtrl-C to stop.")
+    sys.stdout.flush()
+
+    if not serve:
+        server.server_close()
+        return 0
+
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        ui.info("\nStopped.")
+    finally:
+        server.server_close()
     return 0
 
 

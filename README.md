@@ -14,7 +14,7 @@ Dependencies are managed by this project's own pixi environment.
 
 ```sh
 cd ctui
-pixi install                 # creates .pixi/envs/default with python + questionary
+pixi install                 # creates .pixi/envs/default with python, questionary, pygments
 pixi run where               # prints the absolute path of the `ctui` shim
 ```
 
@@ -40,6 +40,7 @@ Or run it without installing: `pixi run ctui --help`.
 | `ctui --resume --recent` | ... offer the 5 most recently opened tasks. |
 | `ctui --sync` | Commit local changes, pull, and push the tasks and wiki repos. |
 | `ctui --list` | Print every known task, non-interactively. |
+| `ctui --view [PORT]` | Serve a browser for tasks and their artifacts on `127.0.0.1:PORT` (default 8765). |
 | `ctui --dream` | Distil a day's claude sessions into the wiki's dated page (run nightly by cron). |
 | `ctui --install-dream` | Install or replace the nightly cron job. `--uninstall-dream` removes it. |
 
@@ -130,6 +131,69 @@ Re-running is safe: sessions already listed under `## Sessions folded in` are sk
 which is tracked by ctui via HTML comment markers rather than by the model, so it
 survives any reformatting. A session that fails is left unmarked and retried next
 time, and one bad session never aborts the rest of the day.
+
+### `ctui --view`
+
+A read-only HTTP browser for what the tasks accumulated: the task list, each task's
+metadata and sessions, and its artifacts rendered by type.
+
+```sh
+ctui --view 8080      # or bare `ctui --view` for port 8765
+```
+
+It listens on `127.0.0.1` only — never the wildcard — because on a shared compute node
+binding `0.0.0.0` would publish every task's artifacts to everyone else on the box. For
+a remote machine, tunnel it; the command prints the exact `ssh -L` line to use. Nothing
+is written and no claude session is started, so it is safe to leave running.
+
+| Route | Shows |
+| --- | --- |
+| `/` | every task, newest first, with a recently-opened strip and a type-to-filter box (press `/`), matching `--resume`'s filtering |
+| `/task/<host>/<id>` | name, root, task dir, created; every session with its transcript size; the top-level artifact listing |
+| `/file/<host>/<id>/<path>` | one artifact, rendered; or a directory listing |
+| `/raw/<host>/<id>/<path>` | the bytes, for `<img>`/`<iframe>` sources and downloads |
+
+**Artifacts means the task directory**, in the same sense as the artifact policy below:
+the byproducts of the work, as against the project itself. The task root is shown as a
+path and flagged when missing, but is not browsable, which keeps the served surface
+exactly one directory per task.
+
+Rendering is per kind, all in-process — nothing is fetched from a CDN, so it works on
+a node with no outbound network:
+
+| Kind | Treatment |
+| --- | --- |
+| markdown | rendered, with a source toggle; HTML comments are hidden, so a dream page reads as prose and its `ctui:session` markers stay out of the way |
+| notebooks | per cell — markdown rendered, code line-numbered, outputs including base64 images, tracebacks ANSI-stripped |
+| JSON / JSONL | pretty-printed; one collapsible record per line for JSONL |
+| CSV / TSV | a real table, parsed with the `csv` module so quoting and embedded newlines survive |
+| code | syntax highlighted by [pygments](https://pygments.org), line-numbered, language labelled |
+| logs / text | line-numbered, ANSI escapes stripped; diffs and patches get highlighted too |
+| images, PDF, video, audio | shown inline |
+| zip / tar | member listing |
+| binary | size, guessed type, hexdump preview, download link |
+
+Generated data lands in task directories, so everything is capped (2 MB per rendered
+file, 500 table rows, 200 JSONL records, 512 KB for highlighting): over the cap the page
+shows a head and a link to the raw bytes rather than trying to render a gigabyte.
+
+Highlighting picks a lexer from the filename first and the fenced-block language second,
+so a `.diff` or a `Makefile` is recognised even though ctui has no extension entry for
+it, and a ```` ```python ```` block inside a markdown artifact is coloured too. Token
+colours come from the same CSS variables as the rest of the page, so light and dark stay
+consistent. If no lexer matches, the file is served as plain line-numbered text rather
+than guessed at — and if highlighting would ever change the line count, it is discarded,
+because the gutter must stay aligned with the code.
+
+Because it serves file contents over HTTP, four things are deliberate. A request is
+confined to its task directory by resolving the path and requiring the result to stay
+inside — which rejects `..`, and rejects the `root` symlink by the same test rather than
+a special case. `/raw` serves only images, PDF, media, `text/plain` and `text/html`
+inline and forces everything else to download, so an artifact cannot choose its own
+renderer. HTML artifacts render in a sandboxed iframe with scripts and network access
+off. And every page carries `default-src 'self'`, which is why the CSS and JS are
+served as their own routes rather than inlined — no `unsafe-inline` anywhere, and no
+CDN, so it works on a node with no outbound network.
 
 ## Layout
 

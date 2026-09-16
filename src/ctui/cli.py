@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import sys
 
-from . import commands, cron, ui
+from . import commands, cron, ui, view
 from .config import ConfigError
 
 VERSION = "0.1.0"
@@ -28,6 +28,7 @@ examples:
   ctui --install-dream --at 03:00
                                (re)install the nightly cron job
   ctui --list                  print all tasks (non-interactive)
+  ctui --view 8080             browse tasks and their artifacts in a browser
 
 Anything after `--` is passed through to claude, e.g.
   ctui --launch -- --model opus --effort high
@@ -55,6 +56,10 @@ def build_parser() -> argparse.ArgumentParser:
                            "its claude sessions")
     mode.add_argument("--list", action="store_true",
                       help="list every known task")
+    mode.add_argument("--view", nargs="?", const=str(view.DEFAULT_PORT),
+                      metavar="PORT",
+                      help=f"serve a task/artifact browser on "
+                           f"{view.BIND_HOST}:PORT (default {view.DEFAULT_PORT})")
     mode.add_argument("--dream", action="store_true",
                       help="distil a day's claude sessions into the wiki's dated "
                            "page (run nightly by cron)")
@@ -104,6 +109,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("pass-through claude arguments only apply to --init, "
                      "--launch, --resume or --dream")
 
+    port = None
+    if args.view is not None:
+        try:
+            port = int(args.view)
+        except ValueError:
+            parser.error(f"--view needs a port number, got {args.view!r}")
+        if not 0 <= port <= 65535:
+            parser.error(f"--view port must be between 0 and 65535, got {port}")
+
     if args.date and not args.dream:
         parser.error("--date only applies to --dream")
     if args.dry_run and not args.dream:
@@ -133,6 +147,8 @@ def main(argv: list[str] | None = None) -> int:
             return commands.cmd_resume(extra=extra, scope=scope)
         if args.list:
             return commands.cmd_list()
+        if port is not None:
+            return commands.cmd_view(port)
         if args.dream:
             return commands.cmd_dream(day=args.date, extra=extra,
                                       dry_run=args.dry_run)

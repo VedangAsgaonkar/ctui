@@ -7,7 +7,7 @@ name = "ctui"
 version = "0.1.0"
 description = "A task-oriented wrapper around claude-code"
 requires-python = ">=3.11"
-dependencies = ["questionary>=2.0"]
+dependencies = ["questionary>=2.0", "pygments>=2.17"]
 
 [project.scripts]
 ctui = "ctui.cli:main"
