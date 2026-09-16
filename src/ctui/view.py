@@ -300,17 +300,24 @@ def _session_rows(task: Task) -> str:
         except OSError:
             transcript = "—"
         label = _e(session.label) if session.label else ""
+        if session.forked_from:
+            origin = (f'<span class="forkmark">↳</span> '
+                      f'<code>{_e(session.forked_from[:8])}</code>')
+        else:
+            origin = '<span class="muted">—</span>'
         rows.append(
             f"<tr><td><code>{_e(session.session_id[:8])}</code></td>"
             f'<td class="muted">{_e(session.created_display)}</td>'
             f"<td>{label}</td>"
+            f"<td>{origin}</td>"
             f'<td class="right muted">{_e(transcript)}</td>'
             f'<td class="muted path">{_e(session.session_id)}</td></tr>'
         )
     return (
         '<div class="tablewrap"><table>'
         "<thead><tr><th>session</th><th>created</th><th>label</th>"
-        '<th class="right">transcript</th><th>full id</th></tr></thead>'
+        '<th>forked from</th><th class="right">transcript</th>'
+        "<th>full id</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table></div>"
     )
 
@@ -564,6 +571,7 @@ td a { text-decoration: none; }
 td a:hover { text-decoration: underline; }
 .listing .icon, .icon { width: 28px; text-align: center; color: var(--muted); }
 .linktarget { color: var(--muted); font-size: 12px; }
+.forkmark { color: var(--accent); }
 table.kv th { width: 130px; color: var(--muted); font-weight: 500; }
 .path { font-size: 12px; word-break: break-all; }
 #filter {

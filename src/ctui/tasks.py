@@ -78,11 +78,14 @@ class Session:
     session_id: str
     created_at: str
     label: str | None = None
+    forked_from: str | None = None
 
     def to_dict(self) -> dict:
         d = {"session_id": self.session_id, "created_at": self.created_at}
         if self.label:
             d["label"] = self.label
+        if self.forked_from:
+            d["forked_from"] = self.forked_from
         return d
 
     @classmethod
@@ -91,6 +94,7 @@ class Session:
             session_id=str(d.get("session_id", "")),
             created_at=str(d.get("created_at", "")),
             label=d.get("label") or None,
+            forked_from=d.get("forked_from") or None,
         )
 
     @property
@@ -169,15 +173,23 @@ class Task:
             except ValueError:
                 return "unknown"
 
-    def add_session(self, session_id: str, label: str | None = None) -> Session:
+    def add_session(self, session_id: str, label: str | None = None,
+                    forked_from: str | None = None) -> Session:
         session = Session(
             session_id=session_id,
             created_at=_now().isoformat(timespec="seconds"),
             label=label,
+            forked_from=forked_from,
         )
         self.sessions.append(session)
         self.save()
         return session
+
+    def find_session(self, session_id: str) -> Session | None:
+        for session in self.sessions:
+            if session.session_id == session_id:
+                return session
+        return None
 
 
 def host_dir(tasks_repo: Path, host: str | None = None) -> Path:

@@ -38,6 +38,7 @@ Or run it without installing: `pixi run ctui --help`.
 | `ctui --resume` | Pick a task covering the current directory, then resume one of its sessions (or open a shell in its root). |
 | `ctui --resume --global` | ... offer every known task instead. |
 | `ctui --resume --recent` | ... offer the 5 most recently opened tasks. |
+| `ctui --fork` | Branch a new session off an existing one, leaving the original untouched. |
 | `ctui --sync` | Commit local changes, pull, and push the tasks and wiki repos. |
 | `ctui --list` | Print every known task, non-interactively. |
 | `ctui --view [PORT]` | Serve a browser for tasks and their artifacts on `127.0.0.1:PORT` (default 8765). |
@@ -88,6 +89,36 @@ Three scopes:
 
 `ctui` does not change your calling shell's directory — it `chdir`s and `exec`s
 claude (or a shell) in the task root, so your own shell is where you left it.
+
+### `ctui --fork`
+
+Branch a new session off an existing one. The fork starts with the parent's whole
+conversation already in context and then diverges; the parent is left exactly as it
+was. Use it to try a second approach from a known-good point without losing the first.
+
+```sh
+ctui --fork                  # tasks covering this directory
+ctui --fork --global         # ... or pick from every task
+ctui --fork -- --model opus  # pass-through args work as everywhere else
+```
+
+It prompts the same way `--resume` does — task first, then session — except the second
+list offers *fork* rather than *resume*, and sessions that are themselves forks are
+labelled `↳ forked from <id>` in both lists.
+
+Underneath it is `claude --resume <parent> --fork-session --session-id <new>`.
+`--fork-session` honours an explicit `--session-id`, which is what lets ctui keep its
+usual invariant: the fork is minted and written into `task.json` *before* claude
+starts, not scraped afterwards.
+
+**ctui records the lineage because claude does not.** A forked transcript is rewritten
+to carry only the new session's id and never mentions the parent anywhere, so the
+`forked_from` field in `task.json` is the only record that the branch happened.
+
+Replayed records keep their original timestamps, so `--dream` does not re-digest a
+parent's earlier day through its fork — the fork only contributes the turns that
+actually happened on the day being distilled. Forking a session on the same day it was
+created does overlap, which dream's own no-duplicates rule absorbs.
 
 ### `ctui --dream`
 
@@ -237,7 +268,9 @@ short name if that yields only a `localhost` placeholder. `CTUI_HOSTNAME` overri
   "root": "/abs/path/to/project",
   "created_at": "2026-09-01T23:49:05-07:00",
   "sessions": [
-    { "session_id": "f93a9f07-0e81-4fcb-be12-ce13ed6ee6d1", "created_at": "..." }
+    { "session_id": "f93a9f07-0e81-4fcb-be12-ce13ed6ee6d1", "created_at": "..." },
+  { "session_id": "2b7c1d90-55aa-4c31-9f0e-7d2b6e4a8c11", "created_at": "...",
+    "forked_from": "f93a9f07-0e81-4fcb-be12-ce13ed6ee6d1" }
   ]
 }
 ```

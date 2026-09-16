@@ -24,6 +24,7 @@ from .config import (
 from .launcher import (
     LauncherError,
     claude_bin,
+    fork_session,
     launch_session,
     open_shell,
     register_session,
@@ -392,16 +393,30 @@ def _task_choices(tasks: list[Task]) -> list[Choice]:
     return choices
 
 
+def _session_summary(session) -> str:
+    text = f"{session.session_id[:8]}  ({session.created_display})"
+    if session.label:
+        text += f"  {session.label}"
+    if session.forked_from:
+        text += f"  ↳ forked from {session.forked_from[:8]}"
+    return text
+
+
 def _session_choices(task: Task) -> list[Choice]:
     choices = [
-        Choice(
-            title=f"resume session {s.session_id[:8]}  ({s.created_display})"
-                  + (f"  {s.label}" if s.label else ""),
-            value=s.session_id,
-        )
+        Choice(title=f"resume session {_session_summary(s)}", value=s.session_id)
         for s in reversed(task.sessions)
     ]
     choices.append(Choice(title="open a shell in the task root", value=SHELL_CHOICE))
+    choices.append(Choice(title="← back to task list", value=BACK_CHOICE))
+    return choices
+
+
+def _fork_choices(task: Task) -> list[Choice]:
+    choices = [
+        Choice(title=f"fork session {_session_summary(s)}", value=s.session_id)
+        for s in reversed(task.sessions)
+    ]
     choices.append(Choice(title="← back to task list", value=BACK_CHOICE))
     return choices
 
@@ -480,6 +495,65 @@ def cmd_resume(extra: list[str] | None = None, scope: str = SCOPE_LOCAL,
 
 def _pick_task_for_resume(tasks: list[Task], label: str) -> Task:
     return ui.ask_select(f"Select a task ({label}):", _task_choices(tasks))
+
+
+# =====================================================================
+# fork
+# =====================================================================
+
+def _fork(task: Task, parent_id: str, extra: list[str], tasks_repo: Path,
+          replace: bool = True) -> int:
+    session_id = register_session(task, forked_from=parent_id)
+    record_access(tasks_repo, task)
+    gitutil.commit_all(
+        tasks_repo,
+        f"ctui: fork session {session_id[:8]} from {parent_id[:8]} "
+        f"in {task.task_id} ({task.name})",
+    )
+    ui.heading(f"forking session {parent_id[:8]} in {task.root}")
+    ui.step(f"new session {session_id}")
+    ui.step(f"{parent_id[:8]} is left untouched")
+    try:
+        _, code = fork_session(task, parent_id, extra, replace=replace,
+                               session_id=session_id)
+    except LauncherError as exc:
+        raise CommandError(str(exc)) from exc
+    return code
+
+
+def cmd_fork(extra: list[str] | None = None, scope: str = SCOPE_LOCAL,
+             replace: bool = True) -> int:
+    """Branch a new session off an existing one, keeping the original intact.
+
+    Same task scopes as --resume; the second prompt picks which session to
+    branch from rather than which to continue.
+    """
+    config = load()
+    tasks, label = _resume_candidates(config, scope)
+    if not tasks:
+        raise _no_candidates_error(config, scope)
+
+    while True:
+        task = _pick_task_for_resume(tasks, label)
+        if not task.root_exists:
+            ui.warn(f"task root {task.root} does not exist on this machine ({hostname()}).")
+            if not ui.ask_confirm("Pick a different task?", default=True):
+                return 1
+            continue
+        if not task.sessions:
+            ui.warn(f"{task.task_id} has no sessions yet — nothing to fork.")
+            ui.info("Use `ctui --launch` to start one.")
+            if not ui.ask_confirm("Pick a different task?", default=True):
+                return 1
+            continue
+
+        choice = ui.ask_select(
+            f"{task.task_id} — {task.name}: fork which session?",
+            _fork_choices(task),
+        )
+        if choice == BACK_CHOICE:
+            continue
+        return _fork(task, choice, extra or [], config.tasks_repo, replace)
 
 
 # =====================================================================

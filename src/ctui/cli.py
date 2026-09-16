@@ -21,6 +21,8 @@ examples:
                                above) the current directory
   ctui --resume --global       ... pick from every known task instead
   ctui --resume --recent       ... pick from the 5 most recently opened
+  ctui --fork                  branch a new session off an existing one
+  ctui --fork --global         ... picking from every known task
   ctui --sync                  pull and push the tasks and wiki repos
   ctui --dream                 distil yesterday's sessions into the wiki
   ctui --dream --date 2026-09-01 --dry-run
@@ -54,6 +56,9 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--resume", action="store_true",
                       help="pick a task covering this directory and resume one of "
                            "its claude sessions")
+    mode.add_argument("--fork", action="store_true",
+                      help="branch a new claude session off an existing one, "
+                           "leaving the original untouched")
     mode.add_argument("--list", action="store_true",
                       help="list every known task")
     mode.add_argument("--view", nargs="?", const=str(view.DEFAULT_PORT),
@@ -70,11 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     scope = parser.add_mutually_exclusive_group()
     scope.add_argument("--global", dest="global_scope", action="store_true",
-                       help="with --resume, offer every known task instead of only "
-                            "those covering this directory")
+                       help="with --resume/--fork, offer every known task instead "
+                            "of only those covering this directory")
     scope.add_argument("--recent", action="store_true",
-                       help=f"with --resume, offer the {commands.RECENT_LIMIT} most "
-                            "recently opened tasks")
+                       help=f"with --resume/--fork, offer the {commands.RECENT_LIMIT} "
+                            "most recently opened tasks")
 
     parser.add_argument("-n", "--name", help="task name for --init (skips the prompt)")
     parser.add_argument("--date", metavar="YYYY-MM-DD",
@@ -93,6 +98,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _scope(args) -> str:
+    if args.recent:
+        return commands.SCOPE_RECENT
+    if args.global_scope:
+        return commands.SCOPE_GLOBAL
+    return commands.SCOPE_LOCAL
+
+
 def _claude_passthrough(rest: list[str]) -> list[str]:
     """argparse.REMAINDER keeps the leading `--`; drop it."""
     if rest and rest[0] == "--":
@@ -105,9 +118,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     extra = _claude_passthrough(args.claude_args)
 
-    if extra and not (args.init or args.launch or args.resume or args.dream):
+    if extra and not (args.init or args.launch or args.resume or args.fork
+                      or args.dream):
         parser.error("pass-through claude arguments only apply to --init, "
-                     "--launch, --resume or --dream")
+                     "--launch, --resume, --fork or --dream")
 
     port = None
     if args.view is not None:
@@ -125,8 +139,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.at and not args.install_dream:
         parser.error("--at only applies to --install-dream")
 
-    if (args.global_scope or args.recent) and not args.resume:
-        parser.error("--global and --recent only apply to --resume")
+    if (args.global_scope or args.recent) and not (args.resume or args.fork):
+        parser.error("--global and --recent only apply to --resume and --fork")
 
     try:
         if args.setup:
@@ -138,13 +152,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.launch:
             return commands.cmd_launch(extra=extra)
         if args.resume:
-            if args.recent:
-                scope = commands.SCOPE_RECENT
-            elif args.global_scope:
-                scope = commands.SCOPE_GLOBAL
-            else:
-                scope = commands.SCOPE_LOCAL
-            return commands.cmd_resume(extra=extra, scope=scope)
+            return commands.cmd_resume(extra=extra, scope=_scope(args))
+        if args.fork:
+            return commands.cmd_fork(extra=extra, scope=_scope(args))
         if args.list:
             return commands.cmd_list()
         if port is not None:

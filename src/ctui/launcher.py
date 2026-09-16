@@ -112,14 +112,19 @@ def _exec(argv: list[str], cwd: Path, replace: bool) -> int:
     return subprocess.run(argv).returncode
 
 
-def register_session(task: Task) -> str:
+def register_session(task: Task, forked_from: str | None = None) -> str:
     """Mint a session ID and record it in task.json.
 
     Split from launch_session so the caller can commit the registration before we
     exec claude — once execv takes over there is no "after" to commit in.
+
+    `forked_from` records the parent when this session is a fork. claude does not
+    keep that link itself: a forked transcript is rewritten to carry only the new
+    session's id and never mentions the parent, so if ctui does not record the
+    lineage nothing does.
     """
     session_id = new_session_id()
-    task.add_session(session_id)
+    task.add_session(session_id, forked_from=forked_from)
     return session_id
 
 
@@ -147,6 +152,27 @@ def resume_session(task: Task, session_id: str, extra: list[str] | None = None,
                    replace: bool = True) -> int:
     argv = _claude_argv(task, extra or [], ["--resume", session_id])
     return _exec(argv, task.root, replace)
+
+
+def fork_session(task: Task, parent_id: str, extra: list[str] | None = None,
+                 replace: bool = True, session_id: str | None = None) -> tuple[str, int]:
+    """Branch a new session off `parent_id`, leaving the parent untouched.
+
+    `--fork-session` honours an explicit `--session-id`, so a fork is registered
+    in task.json before claude starts, exactly like a fresh launch. The parent's
+    transcript is not appended to; the fork gets its own, carrying a copy of the
+    parent's history with the original timestamps.
+    """
+    _require_absolute(task)
+    session_id = session_id or register_session(task, forked_from=parent_id)
+    argv = _claude_argv(
+        task,
+        extra or [],
+        ["--resume", parent_id, "--fork-session",
+         "--session-id", session_id, "--name", task.name],
+    )
+    code = _exec(argv, task.root, replace)
+    return session_id, code
 
 
 def open_shell(task: Task, replace: bool = True) -> int:
