@@ -3,6 +3,7 @@
 import json
 import os
 import shutil
+import time
 
 import pytest
 
@@ -44,10 +45,20 @@ def _make_racy(tasks_repo, task, host="testhost"):
     Two things must hold at once: task.json's mtime still equals the value the
     index recorded for it (so the equality check sees nothing), and it is not
     strictly older than the index file (so it fell in the same tick).
+
+    Both are backdated rather than left at "now", so that the repair's own
+    rewrite of the index is unambiguously in a later tick. Pinning them at the
+    current time instead makes "did the index overtake task.json?" a wall-clock
+    coin flip, and the settles-after-one-lookup assertion a flaky one.
     """
-    recorded = T.read_index(tasks_repo, host).entries[task.task_id]
-    os.utime(task.dir / "task.json", ns=(recorded, recorded))
-    os.utime(T.index_path(tasks_repo, host), ns=(recorded, recorded))
+    past = time.time_ns() - 5_000_000_000
+    os.utime(task.dir / "task.json", ns=(past, past))
+    # Realign the recorded mtime by hand rather than rebuilding: a rebuild would
+    # re-read task.json and repair the very staleness these tests rely on.
+    index = T.read_index(tasks_repo, host)
+    index.entries[task.task_id] = past
+    T.save_index(tasks_repo, index)
+    os.utime(T.index_path(tasks_repo, host), ns=(past, past))
 
 
 def _projects(tmp_path, n):
