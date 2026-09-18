@@ -89,26 +89,31 @@ def ask_select(message: str, choices: list[Choice], default=None,
 
 
 # ---- plain output ----------------------------------------------------
+#
+# Everything flushes. stdout is block-buffered when it is not a tty, so the
+# long unattended commands — `--dream`, `--weave`, `--view` — would otherwise
+# write nothing to their cron log until they exited, which is exactly when
+# progress stops being useful for diagnosing a hang.
 
 def info(msg: str) -> None:
-    print(msg)
+    print(msg, flush=True)
 
 
 def step(msg: str) -> None:
-    print(f"  \033[36m→\033[0m {msg}")
+    print(f"  \033[36m→\033[0m {msg}", flush=True)
 
 
 def ok(msg: str) -> None:
-    print(f"  \033[32m✓\033[0m {msg}")
+    print(f"  \033[32m✓\033[0m {msg}", flush=True)
 
 
 def warn(msg: str) -> None:
-    print(f"  \033[33m!\033[0m {msg}", file=sys.stderr)
+    print(f"  \033[33m!\033[0m {msg}", file=sys.stderr, flush=True)
 
 
 def error(msg: str) -> None:
-    print(f"\033[31merror:\033[0m {msg}", file=sys.stderr)
+    print(f"\033[31merror:\033[0m {msg}", file=sys.stderr, flush=True)
 
 
 def heading(msg: str) -> None:
-    print(f"\n\033[1m{msg}\033[0m")
+    print(f"\n\033[1m{msg}\033[0m", flush=True)
