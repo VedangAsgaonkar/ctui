@@ -362,7 +362,7 @@ def test_prompt_says_sections_are_optional(dreamworld, tasks_repo, wiki_repo):
     page = wiki.ensure_page(wiki_repo, DAY, HOST)
     prompt = dream.dream_prompt(Path("/tmp/d.md"), page, item, 1, 1)
 
-    assert "No section is compulsory" in prompt
+    assert "No part-B section is compulsory" in prompt
     assert "do not invent a learning to fill" in prompt
     for placeholder in ('"none"', '"N/A"'):
         assert placeholder in prompt

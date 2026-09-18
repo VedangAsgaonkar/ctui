@@ -152,7 +152,19 @@ For a given day (default: yesterday) it:
 `--dream --dry-run` stages the digests and reports without calling claude, and
 `--date YYYY-MM-DD` re-runs an earlier day.
 
-**Only reusable learnings are recorded** — methods, not results. The prompt makes this
+The page has two halves, and the prompt is explicit that they follow opposite rules.
+
+`## Experiments & work` is a plain **log of what was done**: one short line per piece
+of work — the experiment run, the thing built, the question investigated — naming the
+actual dataset, model, repo or feature. A handful of words, no outcomes and no
+numbers, just enough that someone scanning a day can see what was worked on. It is the
+only part of the page where being specific is correct, so the prompt exempts it from
+the two rules below by name; without that carve-out those rules suppress it entirely.
+A session that continues work an earlier one already logged leaves that line alone
+rather than logging it twice.
+
+Everything else is the **learnings**, and there
+**only reusable ones are recorded** — methods, not results. The prompt makes this
 the top rule with worked examples: record how to compute a constant with a named
 series, never the digits; how to run a class of benchmark, never the numbers it
 produced; how a metric is defined, never its value. Anything that only makes sense for
@@ -253,7 +265,11 @@ session sees a few KB instead of the whole week. Sections that are empty all wee
 cost nothing at all.
 
 It reads **every host's** dated pages, because a recurring theme is only visible once
-the machines are read together, and writes the shared `topics/` pages. That makes it
+the machines are read together, and writes the shared `topics/` pages. The dated
+pages' `## Experiments & work` log is skipped: it records what was done on one
+specific day, which is the opposite of what a durable topic page is for. That falls
+out of the design rather than needing a special case — weave's topic axis *is* the
+fixed section list, and the log deliberately is not in it. That makes it
 a single-writer job: install the cron on one machine. Two hosts weaving the same week
 would conflict on `ctui --sync`, which is exactly why the *dated* pages are per-host
 and these are not.
@@ -439,7 +455,9 @@ rather than above it, leaving other wiki sections at the top level. Each has fix
 tools, Commands & workflows, Metrics & evaluation, Codebase notes, Practices &
 conventions, Steering & preferences — so pages stay comparable and each kind of
 learning has an obvious home. A section with nothing for it is left empty rather than
-padded. The page carries its own scope note, since it is read by people and by later
+padded. Above them sits `## Experiments & work`, the day's log of what was done, which
+is deliberately *not* one of those fixed sections: it is day-specific by design, so
+`--weave` never folds it into a topic page. The page carries its own scope note, since it is read by people and by later
 dream passes and both need to know that results and measurements are deliberately
 absent.
 

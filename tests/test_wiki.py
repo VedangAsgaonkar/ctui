@@ -101,7 +101,7 @@ def test_template_has_an_empty_tags_line_in_the_header(tmp_path):
 
 def test_template_says_sections_are_optional(tmp_path):
     text = wiki.ensure_page(tmp_path, DAY, HOST).read_text()
-    assert "No section is compulsory" in text
+    assert "No learning section is compulsory" in text
 
 
 def test_page_tags_parses_a_filled_line(tmp_path):

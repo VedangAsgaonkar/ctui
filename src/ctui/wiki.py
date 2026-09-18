@@ -15,8 +15,24 @@ TAGS_PREFIX = "Tags:"
 # list around it.
 FOLDED_MARKER = re.compile(r"<!--\s*ctui:session\s+(\S+)\s*-->")
 
-# The headings a dream pass may write under. Fixed, so pages stay comparable
-# across days and the model has somewhere obvious to put each kind of learning.
+# The one section that is a record rather than a learning: a few words per
+# piece of work, so a page says what was *done* that day as well as what was
+# learned from it.
+#
+# Deliberately not in SECTIONS. It is day-specific by design, which is the
+# opposite of everything else on the page, so it must not become a topic axis:
+# `--weave` folds SECTIONS into durable topic pages, and a log of one day's work
+# has no business being consolidated across weeks.
+LOG_SECTION = (
+    "Experiments & work",
+    "One short line per piece of work attempted — the experiment run, the thing "
+    "built, the question investigated. Specific on purpose, unlike the rest of "
+    "this page. No outcomes and no numbers.",
+)
+
+# The headings a dream pass may write LEARNINGS under. Fixed, so pages stay
+# comparable across days and the model has somewhere obvious to put each kind
+# of learning. These, and only these, are the topic axis `--weave` reduces to.
 SECTIONS = [
     ("Libraries & tools", "How to use a library, framework or CLI: setup, key APIs, flags, gotchas."),
     ("Commands & workflows", "How to run a class of thing — a build, an experiment, a deployment — kept generic."),
@@ -57,8 +73,16 @@ def page_template(day: Date, host: str) -> str:
         "methods, not results. How an experiment is run, not what it showed. How a",
         "metric is computed, not what it measured.",
         "",
-        "No section is compulsory. Most days fill one or two; an empty section",
-        "means there was nothing worth recording, which is a fine outcome.",
+        f"The exception is **{LOG_SECTION[0]}** directly below, which is a plain",
+        "log of what was worked on — specific on purpose, and the only part of this",
+        "page that is.",
+        "",
+        "No learning section is compulsory. Most days fill one or two; an empty",
+        "section means there was nothing worth recording, which is a fine outcome.",
+        "",
+        f"## {LOG_SECTION[0]}",
+        "",
+        f"<!-- {LOG_SECTION[1]} -->",
         "",
     ]
     for title, blurb in SECTIONS:

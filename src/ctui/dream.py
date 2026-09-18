@@ -63,6 +63,7 @@ def dream_prompt(digest_path: Path, page: Path, item: SessionDigest,
                  index: int, total: int) -> str:
     sections = "\n".join(f"- **{title}** — {blurb}" for title, blurb in wiki.SECTIONS)
     tags_prefix = wiki.TAGS_PREFIX
+    log_title = wiki.LOG_SECTION[0]
     return f"""\
 You are the "dream" pass for ctui: a nightly job that distils reusable knowledge
 out of a day's claude-code sessions into a dated wiki page.
@@ -77,11 +78,27 @@ Page: {page}
   The dated wiki page for that day, inside the current directory. Read it before
   you write. The path is absolute; do not go looking for it elsewhere.
 
-Your job: read the digest, then edit that page to record anything from this
-session that will still be useful to someone working on a DIFFERENT task months
-from now. Write under the existing "## " headings.
+Your job has two parts, and they follow opposite rules.
 
-Rules, in order of precedence:
+A. LOG WHAT WAS DONE — the "## {log_title}" section, and only that section.
+   Add one short line naming the piece of work this session was: the experiment
+   run, the thing built, the question investigated. A handful of words, a dozen
+   at most. Name the actual dataset, model, repo, sweep or feature — this is the
+   one place on the page where being specific is right, and a line so generic it
+   could describe any day is useless here.
+   No outcomes, no numbers, no method detail, no narrative of how it went. Just
+   enough that someone scanning the day can see what was worked on.
+   One line per distinct piece of work. If this session continued work already
+   logged there by an earlier session, leave that line alone rather than logging
+   the same work twice. If the page has no such heading — it was written before
+   this section existed — skip part A entirely; rule 5 still holds.
+
+B. DISTIL WHAT WAS LEARNED — every other "## " section.
+   Record anything from this session that will still be useful to someone
+   working on a DIFFERENT task months from now.
+
+Rules, in order of precedence. Rules 1 and 2 govern part B only: part A is
+exempt from both, and is governed by the description above.
 
 1. Methods, never results. Record how something is done; never what it produced.
    Record how to compute a constant to N digits with a named series and library;
@@ -97,12 +114,13 @@ Rules, in order of precedence:
 5. Append only. Never delete or reword another session's content. Never add,
    rename or remove a "## " heading. Never touch "## Sessions folded in"; ctui
    maintains that.
-6. No section is compulsory. Most sessions have something for one or two of
-   them. Leave the rest exactly as they are — do not invent a learning to fill
-   a section, do not pad a thin one, and do not write "none", "N/A" or any
-   other placeholder. An empty section is the correct output when the session
-   taught nothing that belongs there, and changing nothing at all is a correct
-   outcome for a whole session.
+6. No part-B section is compulsory. Most sessions have something for one or two
+   of them. Leave the rest exactly as they are — do not invent a learning to fill
+   a section, do not pad a thin one, and do not write "none", "N/A" or any other
+   placeholder. An empty section is the correct output when the session taught
+   nothing that belongs there, a session that adds only its part-A log line is a
+   perfectly normal outcome, and changing nothing at all is a correct outcome for
+   a session that neither did work worth logging nor taught anything.
 7. Terse and concrete. One learning per bullet. Include the actual command, API
    call, flag or path pattern when it is what makes the bullet useful. No
    preamble and no narrative of what happened in the session.
@@ -113,10 +131,11 @@ Rules, in order of precedence:
    replace it, and never repeat a tag already there. A handful for the whole
    day is plenty. Leave it untouched if nothing new fits — it is optional.
 
-Where things go:
+Where part-B learnings go:
 {sections}
 
-If nothing in this session generalises, change nothing and reply exactly:
+If this session did no work worth logging and taught nothing that generalises,
+change nothing and reply exactly:
 {NOTHING_MARKER}
 """
 

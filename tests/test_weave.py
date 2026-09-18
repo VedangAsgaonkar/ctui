@@ -420,3 +420,57 @@ def test_dry_run_does_not_touch_the_wiki(filled, fake_claude):
                    for p in filled.wiki_repo.rglob("*") if ".git" not in p.parts)
     assert before == after
     assert not wiki.topics_dir(filled.wiki_repo).exists()
+
+
+# ---- the daily log section is never woven -----------------------------
+
+def test_log_section_is_not_a_topic():
+    assert wiki.LOG_SECTION not in wiki.SECTIONS
+    assert wiki.LOG_SECTION[0] not in wiki.section_titles()
+
+
+def test_collect_ignores_the_daily_log_section(config):
+    """The day log is specific by design; consolidating it across weeks is wrong."""
+    path = write_page(config.wiki_repo, "hostA", date(2026, 9, 14),
+                      {"Commands & workflows": "- run it with `sbatch`"})
+    text = path.read_text().replace(
+        "## Commands & workflows",
+        f"## {wiki.LOG_SECTION[0]}\n\n- swept context sizes on relbench\n\n"
+        "## Commands & workflows")
+    path.write_text(text)
+
+    sections = wiki.split_sections(text)
+    assert wiki.LOG_SECTION[0] in sections          # it is really on the page
+    assert not wiki.section_is_empty(sections[wiki.LOG_SECTION[0]])
+
+    topics = weave.collect(config.wiki_repo, W38)
+    assert wiki.LOG_SECTION[0] not in [t.title for t in topics]
+    for topic in topics:
+        assert "relbench" not in topic.to_markdown()
+
+
+def test_weave_creates_no_topic_page_for_the_daily_log(filled, fake_claude):
+    path = wiki.dated_path(filled.wiki_repo, date(2026, 9, 14), "hostA")
+    path.write_text(path.read_text().replace(
+        "## Commands & workflows",
+        f"## {wiki.LOG_SECTION[0]}\n\n- built the fork facility\n\n"
+        "## Commands & workflows"))
+
+    commands.cmd_weave(week="2026-W38")
+
+    log_page = wiki.topic_path(filled.wiki_repo, wiki.LOG_SECTION[0])
+    assert not log_page.exists()
+    written = sorted(p.name for p in wiki.topics_dir(filled.wiki_repo).iterdir())
+    assert wiki.topic_slug(wiki.LOG_SECTION[0]) + ".md" not in written
+    for page in wiki.topics_dir(filled.wiki_repo).iterdir():
+        assert "fork facility" not in page.read_text()
+
+
+def test_real_template_log_section_is_skipped_by_collect(config):
+    """End to end on the actual template, not a hand-built page."""
+    page = wiki.ensure_page(config.wiki_repo, date(2026, 9, 14), "hostA")
+    page.write_text(page.read_text().replace(
+        f"<!-- {wiki.LOG_SECTION[1]} -->",
+        f"<!-- {wiki.LOG_SECTION[1]} -->\n\n- ran a TabPFN context sweep"))
+    topics = weave.collect(config.wiki_repo, W38)
+    assert all("TabPFN" not in t.to_markdown() for t in topics)
