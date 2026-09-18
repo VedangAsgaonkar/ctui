@@ -12,7 +12,7 @@ from pathlib import Path
 
 from questionary import Choice
 
-from . import cron, dream, gitutil, ui, view, wiki
+from . import cron, dream, gitutil, ui, view, weave, wiki
 from .config import (
     DEFAULT_TASKS_DIRNAME,
     DEFAULT_WIKI_DIRNAME,
@@ -598,7 +598,6 @@ def cmd_view(port: int = view.DEFAULT_PORT, serve: bool = True) -> int:
     ui.step(f"tunnel: ssh -N -L {bound}:{view.BIND_HOST}:{bound} "
             f"{getpass.getuser()}@{hostname()}")
     ui.info("\nCtrl-C to stop.")
-    sys.stdout.flush()
 
     if not serve:
         server.server_close()
@@ -700,6 +699,124 @@ def cmd_dream(day: str | None = None, extra: list[str] | None = None,
         ui.ok(f"committed {page.relative_to(wiki_repo)}")
 
     return 1 if failures else 0
+
+
+# =====================================================================
+# weave (the weekly topic-page pass)
+# =====================================================================
+
+def cmd_weave(week: str | None = None, extra: list[str] | None = None,
+              dry_run: bool = False) -> int:
+    """Fold a completed week's dated pages into the topic pages.
+
+    Like dream this runs unattended from cron, so one failing topic reports and
+    the rest of the week still lands.
+    """
+    config = load()
+    wiki_repo = _require_wiki(config)
+
+    try:
+        day = weave.parse_week(week) if week else weave.last_week()
+    except weave.WeaveError as exc:
+        raise CommandError(str(exc)) from exc
+
+    start, end = weave.week_bounds(day)
+    label = weave.week_id(day)
+    ui.heading(f"weave: {label} ({start.isoformat()} to {end.isoformat()})")
+
+    topics = weave.collect(wiki_repo, day)
+    if not topics:
+        ui.step("no dated pages with content in that week")
+        return 0
+
+    # Only the path here, never ensure_topic_page: a dry run must not touch the
+    # wiki, and folded_weeks reads a missing page as "nothing folded in yet".
+    pending = []
+    for topic in topics:
+        page = wiki.topic_path(wiki_repo, topic.title)
+        if label in wiki.folded_weeks(page):
+            continue
+        pending.append((topic, page))
+
+    ui.step(f"{len(topics)} topic(s) with material, {len(pending)} not yet folded in")
+    if not pending:
+        return 0
+
+    if dry_run:
+        # Stage as a real run would, so the inputs can be inspected — the same
+        # bargain `--dream --dry-run` offers.
+        for topic, page in pending:
+            staged = weave.stage(topic)
+            ui.info(f"    {topic.title}: {topic.pages} page(s), {topic.days} day(s)"
+                    f", {staged.stat().st_size} chars  {staged}"
+                    f" -> {page.relative_to(wiki_repo)}")
+        return 0
+
+    failures = 0
+    for index, (topic, page) in enumerate(pending, start=1):
+        wiki.ensure_topic_page(wiki_repo, topic.title, topic.blurb)
+        digest_path = weave.stage(topic)
+        prompt = weave.weave_prompt(digest_path, page, topic, index, len(pending))
+        try:
+            proc = weave._run_claude(prompt, wiki_repo, digest_path.parent, extra)
+        except LauncherError as exc:
+            raise CommandError(str(exc)) from exc
+        except subprocess.TimeoutExpired:
+            ui.warn(f"{topic.title}: timed out after {weave.SESSION_TIMEOUT}s")
+            failures += 1
+            continue
+
+        if proc.returncode != 0:
+            ui.warn(f"{topic.title}: claude exited {proc.returncode}: "
+                    f"{(proc.stderr or proc.stdout).strip()[:300]}")
+            failures += 1
+            continue
+
+        report = weave.parse_report(proc.stdout)
+        if weave.NOTHING_MARKER in proc.stdout:
+            ui.step(f"{topic.title}: nothing new")
+        elif report:
+            ui.ok(f"{topic.title}: merged {report['merged']}, "
+                  f"sharpened {report['sharpened']}, added {report['added']}, "
+                  f"dropped {report['dropped']}")
+        else:
+            ui.ok(f"{topic.title}: woven")
+        # Marked even when nothing changed, so a re-run does not pay to
+        # re-read a week that had nothing to give this topic.
+        wiki.record_folded_week(page, label, topic.days, topic.pages)
+
+    if gitutil.commit_all(wiki_repo, f"ctui weave: {label}"):
+        ui.ok(f"committed {wiki.topics_dir(wiki_repo).relative_to(wiki_repo)}/")
+
+    return 1 if failures else 0
+
+
+def cmd_install_weave(at: str | None = None, weekday: int | None = None) -> int:
+    if not cron.available():
+        raise CommandError("No `crontab` on PATH; cannot install the weave job.")
+    load()
+    try:
+        hour, minute = (cron.parse_time(at) if at
+                        else (cron.DEFAULT_WEAVE_HOUR, cron.DEFAULT_WEAVE_MINUTE))
+        line = cron.install(_ctui_bin(), _claude_bin_or_none(), hour, minute,
+                            job=cron.WEAVE_JOB,
+                            weekday=cron.DEFAULT_WEEKDAY if weekday is None else weekday)
+    except cron.CronError as exc:
+        raise CommandError(str(exc)) from exc
+    ui.ok("installed the weekly weave job")
+    ui.info(f"    {line}")
+    return 0
+
+
+def cmd_uninstall_weave() -> int:
+    if not cron.available():
+        raise CommandError("No `crontab` on PATH.")
+    try:
+        removed = cron.uninstall(cron.WEAVE_JOB)
+    except cron.CronError as exc:
+        raise CommandError(str(exc)) from exc
+    ui.ok("removed the weave job" if removed else "no weave job was installed")
+    return 0
 
 
 def cmd_install_dream(at: str | None = None) -> int:

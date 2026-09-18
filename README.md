@@ -43,7 +43,9 @@ Or run it without installing: `pixi run ctui --help`.
 | `ctui --list` | Print every known task, non-interactively. |
 | `ctui --view [PORT]` | Serve a browser for tasks and their artifacts on `127.0.0.1:PORT` (default 8765). |
 | `ctui --dream` | Distil a day's claude sessions into the wiki's dated page (run nightly by cron). |
+| `ctui --weave` | Fold a completed week's dated pages into the topic pages (run weekly by cron). |
 | `ctui --install-dream` | Install or replace the nightly cron job. `--uninstall-dream` removes it. |
+| `ctui --install-weave` | Install or replace the weekly cron job. `--uninstall-weave` removes it. |
 
 Extra arguments after `--` are passed straight to claude:
 
@@ -226,6 +228,65 @@ off. And every page carries `default-src 'self'`, which is why the CSS and JS ar
 served as their own routes rather than inlined — no `unsafe-inline` anywhere, and no
 CDN, so it works on a node with no outbound network.
 
+### `ctui --weave`
+
+The weekly pass that turns dated pages into durable ones. `--dream` writes what was
+learned on a given day; `--weave` folds a completed week of those into one page per
+topic, so a pattern met three times in three weeks ends up as one sharp line rather
+than three similar bullets on three different days.
+
+```sh
+ctui --weave                          # last completed ISO week
+ctui --weave --week 2026-W38          # a specific week
+ctui --weave --week 2026-09-16        # ... or any date inside it
+ctui --weave --dry-run                # what would be folded in, without claude
+ctui --install-weave --at 05:30       # Monday 05:30 by default
+```
+
+**Topics are the dated pages' sections**, not the `Tags:` line. That is the one axis
+every page shares: dream may never add, rename or remove a `## ` heading, so
+"Commands & workflows" means the same thing on every page ever written, while tags
+are free-form and drift. It also makes routing deterministic — ctui slices section X
+out of each of the week's pages and hands only that slice to topic X's run — so a
+week costs one claude session per topic rather than one per (topic, day), and each
+session sees a few KB instead of the whole week. Sections that are empty all week
+cost nothing at all.
+
+It reads **every host's** dated pages, because a recurring theme is only visible once
+the machines are read together, and writes the shared `topics/` pages. That makes it
+a single-writer job: install the cron on one machine. Two hosts weaving the same week
+would conflict on `ctui --sync`, which is exactly why the *dated* pages are per-host
+and these are not.
+
+The pass has two jobs and the second is the one a careless run gets wrong:
+
+1. **Add** what is genuinely new.
+2. **Integrate** it with what is there — which means editing bullets this week never
+   touched.
+
+So the prompt does not merely ask for that. It requires a decision per incoming item
+— `MERGE` into an existing bullet, `SHARPEN` an existing bullet into the general rule
+the new instance reveals, `ADD`, or `DROP` — with `ADD` named as the last resort and
+a new sub-heading called out as the strongest signal that a pass is appending. A
+sweep step then re-reads the whole page for redundancy that earlier weeks left
+behind. Each run ends with a tally:
+
+```
+MERGED 7 SHARPENED 4 ADDED 3 DROPPED 2
+```
+
+which ctui parses and prints, so a run that only ever `ADD`s is visible in the cron
+log rather than silently growing the page. Getting this wrong is the default
+behaviour: an earlier version of the prompt that only *asked* for merging left 88% of
+existing bullets untouched and landed within 4% of a naive append.
+
+Re-running is safe: a topic page records the weeks folded into it with
+`<!-- ctui:week 2026-W38 -->` markers that ctui owns, so a week is never folded twice
+however the model reformats the list, a topic that fails is retried next time, and
+one failing topic never costs the rest of the week. The weave session gets
+`Read,Edit,Glob,Grep` and, like dream, deliberately **not** `Write` — ctui creates the
+page, so the model can rewrite parts of it but cannot replace it wholesale.
+
 ## Layout
 
 `~/.ctuirc`:
@@ -354,11 +415,22 @@ session is recorded in `task.json` *before* it starts rather than scraped afterw
 
 ```
 ctui-wiki/
-└── dated/
-    └── furiosa.stanford.edu/
-        ├── 2026-09-01.md
-        └── 2026-09-02.md
+├── dated/
+│   └── furiosa.stanford.edu/
+│       ├── 2026-09-01.md
+│       └── 2026-09-02.md
+└── topics/
+    ├── libraries-and-tools.md
+    ├── commands-and-workflows.md
+    ├── metrics-and-evaluation.md
+    ├── codebase-notes.md
+    ├── practices-and-conventions.md
+    └── steering-and-preferences.md
 ```
+
+The dated pages are the record of what was learned *when*; the topic pages are what
+is worth keeping. `--dream` writes the first nightly, `--weave` reduces them into the
+second weekly.
 
 One page per day **per host**, written by `ctui --dream`. A machine only ever writes
 its own directory, using only the sessions of its own tasks, so two hosts distilling
@@ -370,6 +442,16 @@ learning has an obvious home. A section with nothing for it is left empty rather
 padded. The page carries its own scope note, since it is read by people and by later
 dream passes and both need to know that results and measurements are deliberately
 absent.
+
+There is one topic page per section, shared across hosts, written by `ctui --weave`.
+The sections are the topic axis because they are the one thing every dated page has
+in common: dream may never add, rename or remove a `## ` heading, so
+"Commands & workflows" means the same thing on every page ever written. (The `Tags:`
+line is free-form and varies day to day, so it cannot key a stable set of files.)
+
+Unlike a dated page, a topic page is **merged rather than appended to**, and its
+`## ` sub-headings belong to the model: it groups recurring themes under them and
+renames or merges them as the material shifts. Only `## Weeks folded in` is ctui's.
 
 ## Artifact policy
 

@@ -27,6 +27,9 @@ examples:
   ctui --dream                 distil yesterday's sessions into the wiki
   ctui --dream --date 2026-09-01 --dry-run
                                show what would be distilled, without claude
+  ctui --weave                 fold last week's dated pages into the topics
+  ctui --weave --week 2026-W38 --dry-run
+                               show what a given week would fold in
   ctui --install-dream --at 03:00
                                (re)install the nightly cron job
   ctui --list                  print all tasks (non-interactive)
@@ -68,6 +71,13 @@ def build_parser() -> argparse.ArgumentParser:
     mode.add_argument("--dream", action="store_true",
                       help="distil a day's claude sessions into the wiki's dated "
                            "page (run nightly by cron)")
+    mode.add_argument("--weave", action="store_true",
+                      help="fold a completed week's dated pages into the "
+                           "topic pages (run weekly by cron)")
+    mode.add_argument("--install-weave", action="store_true",
+                      help="install or replace the weekly weave cron job")
+    mode.add_argument("--uninstall-weave", action="store_true",
+                      help="remove the weekly weave cron job")
     mode.add_argument("--install-dream", action="store_true",
                       help="install or replace the daily dream cron job")
     mode.add_argument("--uninstall-dream", action="store_true",
@@ -84,12 +94,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("-n", "--name", help="task name for --init (skips the prompt)")
     parser.add_argument("--date", metavar="YYYY-MM-DD",
                         help="with --dream, the day to distil (default: yesterday)")
+    parser.add_argument("--week", metavar="YYYY-Www",
+                        help="with --weave, the week to fold in, as 2026-W38 or "
+                             "any date inside it (default: last week)")
     parser.add_argument("--at", metavar="HH:MM",
-                        help=f"with --install-dream, the time to run "
-                             f"(default {cron.DEFAULT_HOUR:02d}:{cron.DEFAULT_MINUTE:02d})")
+                        help=f"with --install-dream/--install-weave, the time to run "
+                             f"(default {cron.DEFAULT_HOUR:02d}:{cron.DEFAULT_MINUTE:02d} "
+                             f"and {cron.DEFAULT_WEAVE_HOUR:02d}:"
+                             f"{cron.DEFAULT_WEAVE_MINUTE:02d})")
     parser.add_argument("--dry-run", action="store_true",
-                        help="with --dream, stage the digests and report without "
-                             "calling claude")
+                        help="with --dream or --weave, stage the inputs and report "
+                             "without calling claude")
     parser.add_argument("--no-launch", action="store_true",
                         help="with --init, create the task without starting a session")
     parser.add_argument("--version", action="version", version=f"ctui {VERSION}")
@@ -119,9 +134,9 @@ def main(argv: list[str] | None = None) -> int:
     extra = _claude_passthrough(args.claude_args)
 
     if extra and not (args.init or args.launch or args.resume or args.fork
-                      or args.dream):
+                      or args.dream or args.weave):
         parser.error("pass-through claude arguments only apply to --init, "
-                     "--launch, --resume, --fork or --dream")
+                     "--launch, --resume, --fork, --dream or --weave")
 
     port = None
     if args.view is not None:
@@ -134,10 +149,12 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.date and not args.dream:
         parser.error("--date only applies to --dream")
-    if args.dry_run and not args.dream:
-        parser.error("--dry-run only applies to --dream")
-    if args.at and not args.install_dream:
-        parser.error("--at only applies to --install-dream")
+    if args.week and not args.weave:
+        parser.error("--week only applies to --weave")
+    if args.dry_run and not (args.dream or args.weave):
+        parser.error("--dry-run only applies to --dream and --weave")
+    if args.at and not (args.install_dream or args.install_weave):
+        parser.error("--at only applies to --install-dream and --install-weave")
 
     if (args.global_scope or args.recent) and not (args.resume or args.fork):
         parser.error("--global and --recent only apply to --resume and --fork")
@@ -162,6 +179,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.dream:
             return commands.cmd_dream(day=args.date, extra=extra,
                                       dry_run=args.dry_run)
+        if args.weave:
+            return commands.cmd_weave(week=args.week, extra=extra,
+                                      dry_run=args.dry_run)
+        if args.install_weave:
+            return commands.cmd_install_weave(at=args.at)
+        if args.uninstall_weave:
+            return commands.cmd_uninstall_weave()
         if args.install_dream:
             return commands.cmd_install_dream(at=args.at)
         if args.uninstall_dream:
