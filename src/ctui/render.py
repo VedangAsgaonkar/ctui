@@ -11,6 +11,7 @@ import zipfile
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import unquote
 
 import pygments
 from pygments.formatters import HtmlFormatter
@@ -326,6 +327,7 @@ _ITALIC_ALT = re.compile(r"(?<![\w_])_([^_\n]+)_(?![\w_])")
 _STRIKE = re.compile(r"~~(\S(?:.*?\S)?)~~", re.S)
 _SLUG_DROP = re.compile(r"[^\w\s-]")
 _SAFE_SCHEME = re.compile(r"^(https?:|mailto:|#|/|\./|\.\./|[^:]*$)", re.I)
+_SCHEME = re.compile(r"^[a-z][a-z0-9+.-]*:", re.I)
 
 
 def slug(text: str) -> str:
@@ -340,7 +342,27 @@ def safe_url(url: str) -> str:
     return url
 
 
-def _inline(text: str) -> str:
+def _is_external(url: str) -> bool:
+    return bool(_SCHEME.match(url))
+
+
+def _resolved(url: str, is_image: bool, resolve) -> str | None:
+    """Where a markdown URL should actually point, or None if nowhere sensible.
+
+    Relative targets are the whole problem this exists for: a page served at
+    /file/<host>/<task>/results/x.md makes the browser resolve `plot.png`
+    against /file/..., which answers with the *viewer page* for that image
+    rather than its bytes. Only the caller knows the artifact's location, so it
+    supplies the mapping.
+    """
+    if not url or url.startswith("#") or _is_external(url):
+        return None
+    if resolve is None:
+        return None
+    return resolve(unquote(url), is_image)
+
+
+def _inline(text: str, resolve=None) -> str:
     spans: list[str] = []
 
     def stash(match: re.Match) -> str:
@@ -352,12 +374,23 @@ def _inline(text: str) -> str:
 
     def image(match: re.Match) -> str:
         alt = match.group(1)
-        src = safe_url(html.unescape(match.group(2)))
+        raw = html.unescape(match.group(2))
+        if raw.lower().startswith("data:image/"):
+            src = raw
+        elif _is_external(raw):
+            # img-src is 'self': a remote image would be blocked and show as a
+            # broken icon. A link says what it is and stays clickable.
+            href = html.escape(safe_url(raw), quote=True)
+            label = html.escape(alt or raw, quote=False)
+            return f'<a class="extimg" href="{href}">{label} (external image)</a>'
+        else:
+            src = _resolved(raw, True, resolve) or safe_url(raw)
         return f'<img src="{html.escape(src, quote=True)}" alt="{html.escape(alt, quote=True)}">'
 
     def link(match: re.Match) -> str:
         label = match.group(1)
-        href = safe_url(html.unescape(match.group(2)))
+        raw = html.unescape(match.group(2))
+        href = _resolved(raw, False, resolve) or safe_url(raw)
         return f'<a href="{html.escape(href, quote=True)}">{label}</a>'
 
     text = _IMAGE.sub(image, text)
@@ -412,7 +445,7 @@ def _align(spec: str) -> str:
     return ""
 
 
-def _md_table(lines: list[str], i: int) -> tuple[str | None, int]:
+def _md_table(lines: list[str], i: int, resolve=None) -> tuple[str | None, int]:
     if "|" not in lines[i] or i + 1 >= len(lines):
         return None, i
     if not _TABLE_SEP.match(lines[i + 1]) or "|" not in lines[i + 1]:
@@ -424,13 +457,13 @@ def _md_table(lines: list[str], i: int) -> tuple[str | None, int]:
     while j < len(lines) and lines[j].strip() and "|" in lines[j]:
         cells = _cells(lines[j])
         cells += [""] * (len(headers) - len(cells))
-        rows.append([_inline(c) for c in cells[: len(headers)]])
+        rows.append([_inline(c, resolve) for c in cells[: len(headers)]])
         j += 1
-    head = [_inline(h) for h in headers]
+    head = [_inline(h, resolve) for h in headers]
     return table(head, rows, aligns, escape=False), j
 
 
-def _md_list(lines: list[str], i: int) -> tuple[str, int]:
+def _md_list(lines: list[str], i: int, resolve=None) -> tuple[str, int]:
     first = _LIST.match(lines[i])
     base = _indent_of(lines[i])
     ordered = first.group(2)[0].isdigit()
@@ -473,15 +506,15 @@ def _md_list(lines: list[str], i: int) -> tuple[str, int]:
         if filled:
             pad = min(_indent_of(line) for line in filled)
             body = [line[pad:] if len(line) > pad else "" for line in rest]
-            inner = _md_blocks([head, *body])
+            inner = _md_blocks([head, *body], resolve)
         else:
-            inner = _inline(head.strip())
+            inner = _inline(head.strip(), resolve)
         parts.append(f"<li>{inner}</li>")
     tag = "ol" if ordered else "ul"
     return f"<{tag}>" + "".join(parts) + f"</{tag}>", i
 
 
-def _md_blocks(lines: list[str]) -> str:
+def _md_blocks(lines: list[str], resolve=None) -> str:
     out: list[str] = []
     i, total = 0, len(lines)
 
@@ -515,7 +548,7 @@ def _md_blocks(lines: list[str]) -> str:
         if heading:
             level = len(heading.group(1))
             raw = heading.group(2).strip().rstrip("#").strip()
-            out.append(f'<h{level} id="{slug(raw)}">{_inline(raw)}</h{level}>')
+            out.append(f'<h{level} id="{slug(raw)}">{_inline(raw, resolve)}</h{level}>')
             i += 1
             continue
 
@@ -529,15 +562,15 @@ def _md_blocks(lines: list[str]) -> str:
             while i < total and lines[i].lstrip().startswith(">"):
                 buf.append(re.sub(r"^\s*>\s?", "", lines[i]))
                 i += 1
-            out.append(f"<blockquote>{_md_blocks(buf)}</blockquote>")
+            out.append(f"<blockquote>{_md_blocks(buf, resolve)}</blockquote>")
             continue
 
         if _LIST.match(line):
-            block, i = _md_list(lines, i)
+            block, i = _md_list(lines, i, resolve)
             out.append(block)
             continue
 
-        built, nxt = _md_table(lines, i)
+        built, nxt = _md_table(lines, i, resolve)
         if built is not None:
             out.append(built)
             i = nxt
@@ -545,28 +578,33 @@ def _md_blocks(lines: list[str]) -> str:
 
         buf = []
         while i < total and lines[i].strip() and not _starts_block(lines[i]):
-            if buf and _md_table(lines, i)[0] is not None:
+            if buf and _md_table(lines, i, resolve)[0] is not None:
                 break
             buf.append(lines[i].strip())
             i += 1
         if buf:
-            out.append(f"<p>{_inline(' '.join(buf))}</p>")
+            out.append(f"<p>{_inline(' '.join(buf), resolve)}</p>")
         else:
             i += 1
 
     return "".join(out)
 
 
-def markdown_to_html(text: str) -> str:
+def markdown_to_html(text: str, resolve=None) -> str:
+    """Render markdown. `resolve(url, is_image) -> str` rewrites relative targets.
+
+    Without a resolver relative URLs are emitted as written, which is right for
+    a standalone render and wrong for one served over HTTP — see _resolved.
+    """
     cleaned = text.replace("\x00", "").replace("\r\n", "\n").replace("\r", "\n")
-    return _md_blocks(cleaned.split("\n"))
+    return _md_blocks(cleaned.split("\n"), resolve)
 
 
 # ---- per-kind renderers ----------------------------------------------
 
-def _render_markdown(path: Path, _raw: str) -> str:
+def _render_markdown(path: Path, _raw: str, resolve=None) -> str:
     text, clipped = read_text(path)
-    body = markdown_to_html(text)
+    body = markdown_to_html(text, resolve)
     head = notice(f"clipped at {human_size(MAX_RENDER_BYTES)}", "warn") if clipped else ""
     return head + f'<article class="md">{body}</article>'
 
@@ -787,7 +825,7 @@ def _notebook_output(output: dict) -> str:
     return ""
 
 
-def _render_notebook(path: Path, _raw: str) -> str:
+def _render_notebook(path: Path, _raw: str, resolve=None) -> str:
     text, clipped = read_text(path)
     if clipped:
         return notice("too large to render as a notebook", "warn") + \
@@ -821,7 +859,7 @@ def _render_notebook(path: Path, _raw: str) -> str:
         if kind == "markdown":
             out.append(
                 f'<section class="cell md-cell"><div class="cellno">{number} · md</div>'
-                f'<article class="md">{markdown_to_html(source)}</article></section>'
+                f'<article class="md">{markdown_to_html(source, resolve)}</article></section>'
             )
             continue
         if kind == "raw":
@@ -866,7 +904,8 @@ RENDERERS = {
 HAS_SOURCE_VIEW = {"markdown", "notebook", "html", "json"}
 
 
-def render_file(path: Path, raw_url: str, source: bool = False) -> tuple[str, str]:
+def render_file(path: Path, raw_url: str, source: bool = False,
+                resolve=None) -> tuple[str, str]:
     kind = classify(path)
     if source and kind in HAS_SOURCE_VIEW:
         text, clipped = read_text(path)
@@ -874,5 +913,9 @@ def render_file(path: Path, raw_url: str, source: bool = False) -> tuple[str, st
         lang = {"markdown": "markdown", "notebook": "json",
                 "html": "html", "json": "json"}.get(kind, "")
         return kind, head + code_block(text, lang, numbered=True)
+    if kind == "markdown":
+        return kind, _render_markdown(path, raw_url, resolve)
+    if kind == "notebook":
+        return kind, _render_notebook(path, raw_url, resolve)
     renderer = RENDERERS.get(kind, _render_binary)
     return kind, renderer(path, raw_url)

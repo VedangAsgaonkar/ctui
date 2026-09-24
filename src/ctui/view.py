@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import html
 import os
+import posixpath
 import traceback
 from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -359,6 +360,34 @@ def _file_crumbs(task: Task, rel_parts: list[str]) -> str:
     return crumbs(*items)
 
 
+def artifact_resolver(task: Task, rel_parts: list[str]):
+    """Map a markdown URL, relative to this artifact, onto a ctui route.
+
+    Images go to /raw (the bytes) and everything else to /file (the viewer).
+    Without this the browser resolves `plot.png` on a page served at
+    /file/<host>/<task>/results/x.md against /file/..., and gets the viewer
+    page for the image rather than the image.
+    """
+    base = "/".join(rel_parts[:-1])
+    root = task.dir.resolve()
+
+    def resolve(url: str, is_image: bool) -> str | None:
+        if url.startswith("/"):
+            # An absolute filesystem path, usable only if it is in this task.
+            try:
+                inside = Path(url).resolve().relative_to(root)
+            except (ValueError, OSError):
+                return None
+            target = inside.as_posix()
+        else:
+            target = posixpath.normpath(posixpath.join(base, url) if base else url)
+        if target == ".." or target.startswith("../") or target == ".":
+            return None
+        return raw_url(task, target) if is_image else file_url(task, target)
+
+    return resolve
+
+
 def file_page(config, host: str, task_id: str, rel_parts: list[str],
               query: dict[str, list[str]]) -> Response:
     task = _load_task(config, host, task_id)
@@ -376,7 +405,8 @@ def file_page(config, host: str, task_id: str, rel_parts: list[str],
 
     source = query.get("source", ["0"])[0] not in ("0", "", "false")
     raw = raw_url(task, rel)
-    kind, rendered = render.render_file(target, raw, source=source)
+    kind, rendered = render.render_file(
+        target, raw, source=source, resolve=artifact_resolver(task, rel_parts))
 
     try:
         info = target.stat()
@@ -572,6 +602,8 @@ td a:hover { text-decoration: underline; }
 .listing .icon, .icon { width: 28px; text-align: center; color: var(--muted); }
 .linktarget { color: var(--muted); font-size: 12px; }
 .forkmark { color: var(--accent); }
+.extimg { font-size: 13px; border: 1px dashed var(--line); border-radius: 6px;
+          padding: 3px 8px; display: inline-block; }
 table.kv th { width: 130px; color: var(--muted); font-weight: 500; }
 .path { font-size: 12px; word-break: break-all; }
 #filter {

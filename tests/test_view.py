@@ -663,3 +663,118 @@ def test_cli_view_rejects_claude_passthrough(capsys):
     with pytest.raises(SystemExit):
         main(["--view", "8080", "--", "--model", "opus"])
     assert "pass-through" in capsys.readouterr().err
+
+
+# ---- relative URLs in markdown artifacts ------------------------------
+
+def article(body):
+    """Just the rendered markdown — the page chrome has its own /raw and /file links."""
+    return body.split('<article class="md">')[1].split("</article>")[0]
+
+
+def md_at(task, rel, body):
+    path = task.dir / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return view.file_url(task, rel)
+
+
+def test_relative_image_points_at_raw(config, task):
+    (task.dir / "plot.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    url = md_at(task, "notes.md", "![p](plot.png)\n")
+    body = text_of(get(config, url))
+    assert f'src="{view.raw_url(task, "plot.png")}"' in body
+    assert 'src="plot.png"' not in body
+
+
+def test_relative_image_resolves_against_the_files_directory(config, task):
+    (task.dir / "results" / "figs").mkdir(parents=True)
+    (task.dir / "results" / "figs" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    url = md_at(task, "results/r.md", "![a](figs/a.png)\n")
+    body = text_of(get(config, url))
+    assert f'src="{view.raw_url(task, "results/figs/a.png")}"' in body
+
+
+def test_dot_slash_is_normalised(config, task):
+    (task.dir / "d").mkdir()
+    (task.dir / "d" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    body = text_of(get(config, md_at(task, "d/r.md", "![a](./a.png)\n")))
+    assert f'src="{view.raw_url(task, "d/a.png")}"' in body
+
+
+def test_relative_link_points_at_the_viewer_not_raw(config, task):
+    (task.dir / "other.md").write_text("# other\n")
+    body = text_of(get(config, md_at(task, "notes.md", "[o](other.md)\n")))
+    assert f'href="{view.file_url(task, "other.md")}"' in body
+
+
+def test_images_on_a_real_page_serve_as_images(config, task):
+    (task.dir / "figs").mkdir()
+    (task.dir / "figs" / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 8)
+    url = md_at(task, "notes.md", "![a](figs/a.png)\n")
+    body = text_of(get(config, url))
+    src = re.search(r'<img src="([^"]+)"', body).group(1)
+    served = get(config, src)
+    assert served.status == 200
+    assert served.content_type.startswith("image/")
+
+
+def test_escaping_relative_image_is_not_rewritten(config, task):
+    body = article(text_of(get(config, md_at(task, "notes.md",
+                                             "![x](../../../etc/passwd)\n"))))
+    assert "/raw/" not in body and "/file/" not in body
+    assert 'src="../../../etc/passwd"' in body
+
+
+def test_markdown_image_cannot_reach_through_the_root_symlink(config, task, project):
+    (project / "secret.txt").write_text("secret\n")
+    body = text_of(get(config, md_at(task, "notes.md", "![x](root/secret.txt)\n")))
+    src = re.search(r'<img src="([^"]+)"', body).group(1)
+    assert get(config, src).status == 403
+
+
+def test_absolute_path_inside_the_task_is_rewritten(config, task):
+    (task.dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    body = text_of(get(config, md_at(task, "notes.md",
+                                     f"![a]({task.dir / 'a.png'})\n")))
+    assert f'src="{view.raw_url(task, "a.png")}"' in body
+
+
+def test_absolute_path_outside_the_task_is_not_rewritten(config, task):
+    body = article(text_of(get(config, md_at(task, "notes.md", "![x](/etc/passwd)\n"))))
+    assert "/raw/" not in body
+    assert 'src="/etc/passwd"' in body
+
+
+def test_external_image_becomes_a_link(config, task):
+    body = text_of(get(config, md_at(task, "notes.md",
+                                     "![remote](https://example.com/a.png)\n")))
+    assert "<img" not in article(body)
+    assert "external image" in body
+    assert 'href="https://example.com/a.png"' in body
+
+
+def test_data_uri_image_survives(config, task):
+    body = text_of(get(config, md_at(task, "notes.md",
+                                     "![d](data:image/png;base64,QUJD)\n")))
+    assert 'src="data:image/png;base64,QUJD"' in body
+
+
+def test_anchor_links_are_left_alone(config, task):
+    body = text_of(get(config, md_at(task, "notes.md", "# H\n\n[go](#h)\n")))
+    assert 'href="#h"' in body
+
+
+def test_notebook_markdown_cell_images_are_resolved(config, task):
+    (task.dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    book = {"cells": [{"cell_type": "markdown", "source": ["![a](a.png)\n"]}],
+            "metadata": {}}
+    (task.dir / "n.ipynb").write_text(json.dumps(book))
+    body = text_of(get(config, view.file_url(task, "n.ipynb")))
+    assert f'src="{view.raw_url(task, "a.png")}"' in body
+
+
+def test_markdown_without_a_resolver_is_unchanged():
+    out = render.markdown_to_html("![a](plot.png)\n[l](other.md)")
+    assert 'src="plot.png"' in out
+    assert 'href="other.md"' in out
