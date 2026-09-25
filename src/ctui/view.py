@@ -685,6 +685,14 @@ details.record .codewrap { margin: 0; border: none; border-top: 1px solid var(--
 .md hr { border: none; border-top: 1px solid var(--line); margin: 22px 0; }
 .md img { max-width: 100%; border-radius: 6px; }
 .md .tablewrap { margin: 12px 0; }
+.md details { border: 1px solid var(--line); border-radius: 8px;
+              background: var(--panel); margin: 12px 0; padding: 0 14px; }
+.md details[open] { padding-bottom: 8px; }
+.md summary { cursor: pointer; padding: 9px 0; font-weight: 600; margin: 0 -14px;
+              padding-left: 14px; padding-right: 14px; }
+.md summary:hover { color: var(--accent); }
+.md :target { scroll-margin-top: 64px; }
+.md a[id]:empty { display: block; height: 0; }
 .notebook .cell { margin: 16px 0; }
 .cellno { font-size: 11px; color: var(--muted); margin-bottom: 4px;
           font-family: ui-monospace, Menlo, monospace; }

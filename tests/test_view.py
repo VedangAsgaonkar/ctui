@@ -778,3 +778,156 @@ def test_markdown_without_a_resolver_is_unchanged():
     out = render.markdown_to_html("![a](plot.png)\n[l](other.md)")
     assert 'src="plot.png"' in out
     assert 'href="other.md"' in out
+
+
+# ---- raw HTML in markdown artifacts ----------------------------------
+
+def test_explicit_anchor_targets_survive(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", '<a id="setup"></a>\n\n## Setup\n\n[go](#setup)\n'))))
+    assert '<a id="setup"></a>' in body
+    assert 'href="#setup"' in body
+
+
+def test_in_page_links_all_have_targets(config, task):
+    doc = ('- [One](#one)\n- [Two](#two)\n\n'
+           '<a id="one"></a>\n\n## First\n\ntext\n\n'
+           '<a id="two"></a>\n\n## Second\n\ntext\n')
+    body = article(text_of(get(config, md_at(task, "n.md", doc))))
+    targets = set(re.findall(r'\bid="([^"]+)"', body))
+    for anchor in re.findall(r'href="#([^"]+)"', body):
+        assert anchor in targets, anchor
+
+
+def test_details_and_summary_pass_through(config, task):
+    doc = "<details>\n<summary>Show</summary>\n\n- a list\n\n</details>\n"
+    body = article(text_of(get(config, md_at(task, "n.md", doc))))
+    assert "<details>" in body and "<summary>Show</summary>" in body
+    assert "<li>a list</li>" in body          # markdown inside still renders
+    assert "&lt;details&gt;" not in body
+
+
+def test_script_is_escaped_not_executed(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", "<script>alert(1)</script>\n"))))
+    assert "<script>" not in body
+    assert "&lt;script&gt;" in body
+
+
+def test_iframe_is_escaped(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", '<iframe src="/etc"></iframe>\n'))))
+    assert "<iframe" not in body
+
+
+@pytest.mark.parametrize("markup,banned", [
+    ('<a href="javascript:alert(1)">x</a>', "javascript:"),
+    ('<div onclick="alert(1)">x</div>', "onclick"),
+    ('<img src="x.png" onerror="alert(1)">', "onerror"),
+    ('<a href="vbscript:x">y</a>', "vbscript:"),
+])
+def test_dangerous_attributes_are_stripped(config, task, markup, banned):
+    body = article(text_of(get(config, md_at(task, "n.md", markup + "\n"))))
+    assert banned not in body
+
+
+def test_inline_html_inside_a_paragraph(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", "line one<br>line two and <sup>a</sup>\n"))))
+    assert "<br />" in body and "<sup>a</sup>" in body
+
+
+def test_html_inside_a_code_span_stays_literal(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", "use `<details>` for this\n"))))
+    assert "<code>&lt;details&gt;</code>" in body
+    assert "<details>" not in body
+
+
+def test_unknown_tags_are_escaped_and_still_visible(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", "labelled `d<bfs depth>` and <notatag>text</notatag>\n"))))
+    assert "&lt;notatag&gt;text&lt;/notatag&gt;" in body
+    assert "bfs depth" in body
+
+
+def test_img_in_raw_html_is_resolved_to_raw(config, task):
+    (task.dir / "a.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+    body = article(text_of(get(config, md_at(
+        task, "n.md", '<img src="a.png" alt="a">\n'))))
+    assert f'src="{view.raw_url(task, "a.png")}"' in body
+
+
+def test_anchor_href_in_raw_html_is_resolved(config, task):
+    (task.dir / "other.md").write_text("# o\n")
+    body = article(text_of(get(config, md_at(
+        task, "n.md", '<a href="other.md">o</a>\n'))))
+    assert f'href="{view.file_url(task, "other.md")}"' in body
+
+
+def test_html_comments_are_still_hidden(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", "<!-- secret -->\n\ntext\n"))))
+    assert "secret" not in body
+
+
+def test_sanitize_html_is_usable_standalone():
+    assert render.sanitize_html("<b>x</b>") == "<b>x</b>"
+    assert render.sanitize_html("<script>x</script>") == "&lt;script&gt;x&lt;/script&gt;"
+
+
+def test_indented_code_block_is_code_not_prose(config, task):
+    doc = "Paths:\n\n    out/<db>__<table>{.json,.npz}\n    more/<host>\n\ntail\n"
+    body = article(text_of(get(config, md_at(task, "n.md", doc))))
+    assert "<pre" in body
+    assert "&lt;table&gt;" in body
+    assert "<table" not in body          # the placeholder is not markup
+    assert "<p>tail</p>" in body
+
+
+def test_block_tag_in_prose_is_not_markup(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", "a lone <table> placeholder and <td> too\n"))))
+    assert "<table" not in body and "<td" not in body
+    assert "&lt;table&gt;" in body
+
+
+def test_inline_tag_in_prose_is_still_markup(config, task):
+    body = article(text_of(get(config, md_at(
+        task, "n.md", "break<br>here and <kbd>^C</kbd>\n"))))
+    assert "<br />" in body and "<kbd>^C</kbd>" in body
+
+
+def test_block_tag_at_line_start_is_still_markup(config, task):
+    doc = "<table>\n<tr><td>a</td></tr>\n</table>\n"
+    body = article(text_of(get(config, md_at(task, "n.md", doc))))
+    assert "<table>" in body and "</table>" in body
+
+
+def test_rendered_page_tags_stay_balanced(config, task):
+    from html.parser import HTMLParser
+
+    void = {"br", "hr", "img", "wbr", "meta", "link", "input"}
+    doc = ("<a id=\"t\"></a>\n\n# H\n\n<details>\n<summary>s</summary>\n\n"
+           "- x\n\n    code/<table>\n\n</details>\n\nlone <table> here\n")
+    body = text_of(get(config, md_at(task, "n.md", doc)))
+
+    class Balance(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack, self.bad = [], []
+
+        def handle_starttag(self, tag, attrs):
+            if tag not in void:
+                self.stack.append(tag)
+
+        def handle_endtag(self, tag):
+            if tag in void:
+                return
+            if not self.stack or self.stack.pop() != tag:
+                self.bad.append(tag)
+
+    parser = Balance()
+    parser.feed(body)
+    parser.close()
+    assert not parser.bad and not parser.stack, (parser.bad, parser.stack)

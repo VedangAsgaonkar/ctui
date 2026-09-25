@@ -10,6 +10,7 @@ import tarfile
 import zipfile
 from dataclasses import dataclass
 from datetime import datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -309,6 +310,116 @@ def table(headers: list[str], rows: list[list[str]], aligns: list[str] | None = 
     return '<div class="tablewrap"><table>' + "".join(out) + "</table></div>"
 
 
+# ---- a sanitised subset of raw HTML ----------------------------------
+#
+# Generated reports lean on HTML markdown has no syntax for: `<a id="x"></a>`
+# targets for a contents list, and `<details>/<summary>` for collapsible
+# sections. Escaping all of it, as this renderer first did, turns those into
+# visible angle brackets and silently breaks every in-page link.
+#
+# Passing it through verbatim is the other extreme. The page's CSP already
+# stops inline script from running, but CSP is a backstop, not a licence, so
+# tags and attributes are allowlisted and anything else is escaped back to
+# visible text rather than dropped — a surprise should be readable, not silent.
+
+VOID_HTML = {"br", "hr", "img", "wbr"}
+
+ALLOWED_HTML: dict[str, set[str]] = {
+    "a": {"href", "id", "name", "title"},
+    "img": {"src", "alt", "title", "width", "height"},
+    "details": {"open", "id"}, "summary": {"id"},
+    "br": set(), "hr": set(), "wbr": set(),
+    "b": set(), "strong": set(), "i": set(), "em": set(), "u": set(),
+    "s": set(), "del": set(), "ins": set(), "mark": set(), "small": set(),
+    "sup": set(), "sub": set(), "kbd": set(), "code": set(), "pre": set(),
+    "p": {"id"}, "div": {"id"}, "span": {"id"}, "blockquote": {"id"},
+    "ul": set(), "ol": {"start"}, "li": set(), "dl": set(), "dt": set(),
+    "dd": set(), "caption": set(), "colgroup": set(), "col": {"span"},
+    "table": set(), "thead": set(), "tbody": set(), "tfoot": set(),
+    "tr": set(), "th": {"align", "colspan", "rowspan"},
+    "td": {"align", "colspan", "rowspan"},
+    **{f"h{n}": {"id"} for n in range(1, 7)},
+}
+
+# Only these are recognised in the middle of a paragraph. Block-level tags
+# have to start a line to count, because prose in these reports uses angle
+# brackets as placeholders — `<db>__<table>` is a filename pattern, not markup,
+# and turning that lone `<table>` into an element breaks the rest of the page.
+INLINE_HTML = {
+    "a", "img", "br", "wbr", "b", "strong", "i", "em", "u", "s", "del", "ins",
+    "mark", "small", "sup", "sub", "kbd", "code", "span",
+}
+
+_HTML_LINE = re.compile(
+    r"^ {0,3}</?(" + "|".join(sorted(ALLOWED_HTML)) + r")\b[^>]*>", re.I)
+_HTML_TAG = re.compile(
+    r"</?(" + "|".join(sorted(INLINE_HTML)) + r")\b[^>]*>", re.I)
+
+
+def _tag_url(value: str, is_image: bool, resolve) -> str:
+    return _resolved(value, is_image, resolve) or safe_url(value)
+
+
+class _Sanitiser(HTMLParser):
+    def __init__(self, resolve=None):
+        super().__init__(convert_charrefs=False)
+        self.out: list[str] = []
+        self.resolve = resolve
+
+    def _emit_tag(self, tag: str, attrs, self_closing: bool) -> None:
+        allowed = ALLOWED_HTML.get(tag.lower())
+        if allowed is None:
+            self.out.append(html.escape(self.get_starttag_text() or "", quote=False))
+            return
+        parts = [tag.lower()]
+        for name, value in attrs:
+            name = name.lower()
+            if name not in allowed:
+                continue
+            if value is None:
+                parts.append(name)
+                continue
+            if name in ("href", "src"):
+                value = _tag_url(html.unescape(value), name == "src", self.resolve)
+            parts.append(f'{name}="{html.escape(value, quote=True)}"')
+        closer = " />" if (self_closing or tag.lower() in VOID_HTML) else ">"
+        self.out.append("<" + " ".join(parts) + closer)
+
+    def handle_starttag(self, tag, attrs):
+        self._emit_tag(tag, attrs, self_closing=False)
+
+    def handle_startendtag(self, tag, attrs):
+        self._emit_tag(tag, attrs, self_closing=True)
+
+    def handle_endtag(self, tag):
+        if tag.lower() in ALLOWED_HTML and tag.lower() not in VOID_HTML:
+            self.out.append(f"</{tag.lower()}>")
+        else:
+            self.out.append(html.escape(f"</{tag}>", quote=False))
+
+    def handle_data(self, data):
+        self.out.append(html.escape(data, quote=False))
+
+    def handle_entityref(self, name):
+        self.out.append(f"&{name};")
+
+    def handle_charref(self, name):
+        self.out.append(f"&#{name};")
+
+    def handle_comment(self, data):
+        return
+
+
+def sanitize_html(fragment: str, resolve=None) -> str:
+    parser = _Sanitiser(resolve)
+    try:
+        parser.feed(fragment)
+        parser.close()
+    except Exception:
+        return html.escape(fragment, quote=False)
+    return "".join(parser.out)
+
+
 # ---- markdown --------------------------------------------------------
 
 _FENCE = re.compile(r"^\s*(`{3,}|~{3,})\s*([\w+#.-]*)\s*$")
@@ -370,6 +481,15 @@ def _inline(text: str, resolve=None) -> str:
         return f"\x00{len(spans) - 1}\x00"
 
     text = _CODESPAN.sub(stash, text)
+
+    tags: list[str] = []
+
+    def stash_tag(match: re.Match) -> str:
+        tags.append(match.group(0))
+        return f"\x01{len(tags) - 1}\x01"
+
+    # After the code spans, so `<br>` written inside backticks stays literal.
+    text = _HTML_TAG.sub(stash_tag, text)
     text = html.escape(text, quote=False)
 
     def image(match: re.Match) -> str:
@@ -404,6 +524,11 @@ def _inline(text: str, resolve=None) -> str:
     text = _STRIKE.sub(r"<del>\1</del>", text)
     text = _ITALIC.sub(r"<em>\1</em>", text)
     text = _ITALIC_ALT.sub(r"<em>\1</em>", text)
+    text = re.sub(
+        r"\x01(\d+)\x01",
+        lambda m: sanitize_html(tags[int(m.group(1))], resolve),
+        text,
+    )
     return re.sub(
         r"\x00(\d+)\x00",
         lambda m: f"<code>{html.escape(spans[int(m.group(1))])}</code>",
@@ -424,6 +549,7 @@ def _starts_block(line: str) -> bool:
         or _LIST.match(line)
         or line.lstrip().startswith(">")
         or line.lstrip().startswith("<!--")
+        or _HTML_LINE.match(line)
     )
 
 
@@ -568,6 +694,25 @@ def _md_blocks(lines: list[str], resolve=None) -> str:
         if _LIST.match(line):
             block, i = _md_list(lines, i, resolve)
             out.append(block)
+            continue
+
+        if _indent_of(line) >= 4:
+            # An indented code block. Without this its contents are parsed as
+            # prose, and anything angle-bracketed in it becomes markup.
+            buf = []
+            while i < total and (not lines[i].strip() or _indent_of(lines[i]) >= 4):
+                buf.append(lines[i].expandtabs(4)[4:])
+                i += 1
+            while buf and not buf[-1].strip():
+                buf.pop()
+            out.append(code_block("\n".join(buf)))
+            continue
+
+        if _HTML_LINE.match(line):
+            # Passed through as its own block rather than wrapped in <p>, so
+            # `<details>` can bracket markdown that is still rendered normally.
+            out.append(sanitize_html(line.strip(), resolve))
+            i += 1
             continue
 
         built, nxt = _md_table(lines, i, resolve)
