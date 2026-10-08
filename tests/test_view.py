@@ -931,3 +931,82 @@ def test_rendered_page_tags_stay_balanced(config, task):
     parser.feed(body)
     parser.close()
     assert not parser.bad and not parser.stack, (parser.bad, parser.stack)
+
+
+# ---- light/dark theme toggle -----------------------------------------
+
+def test_theme_script_is_served(config):
+    r = get(config, "/theme.js")
+    assert r.status == 200
+    assert r.content_type.startswith("text/javascript")
+    assert "ctui-theme" in text_of(r)
+
+
+def test_theme_script_loads_in_head_before_paint(config, task):
+    page = text_of(get(config, "/"))
+    head = page.split("</head>")[0]
+    assert "/theme.js" in head, "must run before first paint or the theme flashes"
+    assert page.rindex("/app.js") > page.rindex("</main>")
+
+
+def test_no_inline_script_so_csp_stays_strict(config, task):
+    r = get(config, "/")
+    assert "<script>" not in text_of(r)
+    assert "unsafe-inline" not in r.headers["Content-Security-Policy"]
+
+
+@pytest.mark.parametrize("url", ["/", "/task/{host}/{task}", "/file/{host}/{task}",
+                                 "/nope"])
+def test_toggle_appears_on_every_page(config, task, url):
+    resolved = url.format(host=HOST, task=task.task_id)
+    body = text_of(get(config, resolved))
+    assert 'id="theme-toggle"' in body
+    assert "/theme.js" in body
+
+
+def test_both_palettes_define_the_same_variables():
+    names = lambda css: set(re.findall(r"(--[a-z0-9-]+)\s*:", css))
+    light, dark = names(view.LIGHT_VARS), names(view.DARK_VARS)
+    assert light == dark, f"only in light: {light - dark}, only in dark: {dark - light}"
+    assert len(light) > 10
+
+
+def test_every_variable_used_is_defined_in_both_palettes():
+    defined = set(re.findall(r"(--[a-z0-9-]+)\s*:", view.LIGHT_VARS))
+    # var(--x) without a fallback must resolve; var(--x, y) may not.
+    used = set(re.findall(r"var\((--[a-z0-9-]+)\s*\)", view.STYLE))
+    assert not used - defined, f"undefined: {sorted(used - defined)}"
+
+
+def test_theme_rules_cover_the_three_states():
+    css = view.STYLE
+    assert "@media (prefers-color-scheme: dark)" in css
+    assert ':root:not([data-theme="light"])' in css   # auto, system dark
+    assert ':root[data-theme="dark"]' in css          # pinned dark
+    assert ':root[data-theme="light"]' in css         # pinned light
+
+
+def test_pinned_rules_come_after_the_media_query():
+    css = view.STYLE
+    assert css.index("@media (prefers-color-scheme: dark)") < \
+        css.index(':root[data-theme="dark"]')
+    assert css.index("@media (prefers-color-scheme: dark)") < \
+        css.index(':root[data-theme="light"]')
+
+
+def test_colour_scheme_is_declared_for_native_widgets():
+    assert "color-scheme: light" in view.LIGHT_VARS
+    assert "color-scheme: dark" in view.DARK_VARS
+
+
+def test_theme_script_offers_three_modes():
+    script = view.THEME_SCRIPT
+    assert "'auto', 'light', 'dark'" in script
+    assert "removeAttribute('data-theme')" in script   # auto clears the pin
+    assert "localStorage" in script
+
+
+def test_toggle_has_an_accessible_default_label(config, task):
+    body = text_of(get(config, "/"))
+    assert 'aria-label="Switch colour theme"' in body
+    assert "auto" in body.split('id="theme-toggle"')[1][:200]

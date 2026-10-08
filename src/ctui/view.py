@@ -81,10 +81,13 @@ def page(title: str, crumbs: str, body: str) -> bytes:
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{_e(title)}</title>
 <link rel="stylesheet" href="/style.css">
+<script src="/theme.js"></script>
 </head>
 <body>
 <header>
 <nav class="crumbs">{crumbs}</nav>
+<button id="theme-toggle" class="themetoggle" type="button"
+        aria-label="Switch colour theme">◐ auto</button>
 </header>
 <main>
 {body}
@@ -474,6 +477,9 @@ def handle(config, target: str) -> Response:
         if segments == ["app.js"]:
             return Response(body=SCRIPT.encode("utf-8"),
                             content_type="text/javascript; charset=utf-8")
+        if segments == ["theme.js"]:
+            return Response(body=THEME_SCRIPT.encode("utf-8"),
+                            content_type="text/javascript; charset=utf-8")
         if segments == ["favicon.ico"]:
             return Response(status=404, body=b"", content_type="text/plain; charset=utf-8")
         if segments[0] == "task" and len(segments) == 3:
@@ -533,8 +539,8 @@ def make_server(config, port: int, host: str = BIND_HOST) -> ViewServer:
 
 # ---- assets ----------------------------------------------------------
 
-STYLE = """
-:root {
+LIGHT_VARS = """
+  color-scheme: light;
   --bg: #fbfbfa; --fg: #1a1a18; --muted: #6b6b66; --line: #e2e1dd;
   --panel: #ffffff; --accent: #0b6fa4; --code-bg: #f4f3f0;
   --warn: #9a5b00; --error: #a8200d; --chip: #f0efec;
@@ -542,18 +548,34 @@ STYLE = """
   --tk-number: #a8560a; --tk-func: #1a5fb4; --tk-class: #8a5a00;
   --tk-builtin: #0d6b70; --tk-op: #545a63; --tk-meta: #a03e3e;
   --tk-name: #2b3038; --tk-added: #17693f; --tk-removed: #a8200d;
-}
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #16171a; --fg: #e6e5e1; --muted: #93938d; --line: #2c2e33;
-    --panel: #1c1d21; --accent: #6fb8e0; --code-bg: #212328;
-    --warn: #d8a13a; --error: #e2715e; --chip: #24262b;
-    --tk-comment: #8b8f99; --tk-keyword: #c49ae8; --tk-string: #8ad196;
-    --tk-number: #e8b177; --tk-func: #82b8f5; --tk-class: #e5c07b;
-    --tk-builtin: #6fd0c8; --tk-op: #b6bdc9; --tk-meta: #e8968f;
-    --tk-name: #dcdbd6; --tk-added: #8ad196; --tk-removed: #e2715e;
-  }
-}
+"""
+
+DARK_VARS = """
+  color-scheme: dark;
+  --bg: #16171a; --fg: #e6e5e1; --muted: #93938d; --line: #2c2e33;
+  --panel: #1c1d21; --accent: #6fb8e0; --code-bg: #212328;
+  --warn: #d8a13a; --error: #e2715e; --chip: #24262b;
+  --tk-comment: #8b8f99; --tk-keyword: #c49ae8; --tk-string: #8ad196;
+  --tk-number: #e8b177; --tk-func: #82b8f5; --tk-class: #e5c07b;
+  --tk-builtin: #6fd0c8; --tk-op: #b6bdc9; --tk-meta: #e8968f;
+  --tk-name: #dcdbd6; --tk-added: #8ad196; --tk-removed: #e2715e;
+"""
+
+# Three states, because the OS-following default predates the toggle and
+# losing it would be a regression: no data-theme follows the system, and an
+# explicit data-theme pins it. The dark block appears twice rather than being
+# duplicated in source — :is() would collapse them, but the media query has to
+# stay a separate rule for the :not() to mean "system dark unless pinned light".
+THEME_CSS = (
+    ":root {" + LIGHT_VARS + "}\n"
+    "@media (prefers-color-scheme: dark) {\n"
+    '  :root:not([data-theme="light"]) {' + DARK_VARS + "}\n"
+    "}\n"
+    ':root[data-theme="dark"] {' + DARK_VARS + "}\n"
+    ':root[data-theme="light"] {' + LIGHT_VARS + "}\n"
+)
+
+STYLE = THEME_CSS + """
 * { box-sizing: border-box; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
@@ -564,7 +586,15 @@ header {
   position: sticky; top: 0; z-index: 5; background: var(--panel);
   border-bottom: 1px solid var(--line); padding: 10px 24px;
 }
-.crumbs { font-size: 13px; }
+header { display: flex; align-items: center; gap: 16px; }
+.crumbs { font-size: 13px; flex: 1; min-width: 0; }
+.themetoggle {
+  flex: none; font: inherit; font-size: 12px; cursor: pointer;
+  background: var(--panel); color: var(--muted); border: 1px solid var(--line);
+  border-radius: 6px; padding: 3px 10px; min-width: 76px; text-align: center;
+}
+.themetoggle:hover { color: var(--accent); border-color: var(--accent); }
+.themetoggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
 .crumbs a { color: var(--accent); text-decoration: none; }
 .crumbs a:hover { text-decoration: underline; }
 .crumbs .sep { color: var(--muted); margin: 0 8px; }
@@ -734,6 +764,62 @@ pre.code .tk-gp { color: var(--tk-comment); }
 pre.code .tk-ge { font-style: italic; }
 pre.code .tk-gs { font-weight: 600; }
 pre.code .tk-gr { color: var(--error); }
+"""
+
+# Loaded synchronously from <head>, which is the whole point: applying the
+# theme from the end of <body> repaints, so a dark-mode user would see a white
+# flash on every navigation. It is a separate route rather than an inline
+# <script> because the page CSP has no 'unsafe-inline' and is not worth
+# loosening for this.
+THEME_SCRIPT = """
+(function () {
+  var KEY = 'ctui-theme';
+  var MODES = ['auto', 'light', 'dark'];
+  var GLYPH = {auto: '\u25d0', light: '\u2600', dark: '\u263e'};
+
+  function read() {
+    try {
+      return localStorage.getItem(KEY);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function apply(mode) {
+    var root = document.documentElement;
+    if (mode === 'auto') {
+      root.removeAttribute('data-theme');
+    } else {
+      root.setAttribute('data-theme', mode);
+    }
+  }
+
+  var mode = read();
+  if (MODES.indexOf(mode) === -1) { mode = 'auto'; }
+  apply(mode);
+
+  function label(button) {
+    button.textContent = GLYPH[mode] + ' ' + mode;
+    button.title = 'Colour theme: ' + mode + ' (click to change)';
+    button.setAttribute('aria-label', 'Colour theme: ' + mode + '. Click to change.');
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    var button = document.getElementById('theme-toggle');
+    if (!button) { return; }
+    label(button);
+    button.addEventListener('click', function () {
+      mode = MODES[(MODES.indexOf(mode) + 1) % MODES.length];
+      try {
+        localStorage.setItem(KEY, mode);
+      } catch (e) {
+        /* private mode: the choice just will not persist */
+      }
+      apply(mode);
+      label(button);
+    });
+  });
+})();
 """
 
 SCRIPT = """
